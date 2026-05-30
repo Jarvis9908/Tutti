@@ -1,0 +1,24 @@
+src := @module_root@
+obj-m += snvme-core.o
+obj-m += snvme.o
+
+
+ccflags-y += @module_ccflags@
+
+snvme-core-y				:= core.o ioctl.o
+snvme-core-$(CONFIG_NVME_MULTIPATH)	+= multipath.o
+snvme-core-$(CONFIG_BLK_DEV_ZONED)	+= zns.o
+snvme-core-$(CONFIG_NVME_HWMON)		+= hwmon.o
+
+snvme-objs := nvfs-pci.o nvfs-p2p.o list.o ctrl.o map.o pci.o 
+
+KERNEL_SRC := /lib/modules/$(shell uname -r)/build
+
+all:
+	$(MAKE) -C $(KERNEL_SRC) M=@module_output@ modules
+insmod:
+	sudo insmod snvme-core.ko && sudo insmod snvme.ko
+rmmod:
+	sudo rmmod snvme && sudo rmmod snvme_core
+clean:
+	rm -fr *.o *.ko *.mod* .*.cmd .*.d
