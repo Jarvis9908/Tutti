@@ -126,9 +126,32 @@ static const struct kernel_param_ops io_queue_depth_ops = {
 	.get = param_get_uint,
 };
 
-static unsigned int io_queue_depth = 1024;
+/*
+ * snvme: default io_queue_depth lowered from 1024 to 64.
+ *
+ * Rationale: user IOQs are created via NVM_ADD_USER_QUEUE, whose
+ * adapter_alloc_{sq,cq}_user path currently uses Create I/O SQ/CQ
+ * with CDW11.PC=1 (Physically Contiguous) and PRP1 = addrs[0] from
+ * the userspace-registered ring map.  Userspace mmap() yields
+ * virtually-contiguous but physically-fragmented pages, so the ring
+ * MUST fit in a single 4 KiB page:
+ *
+ *   SQ ring bytes = q_depth * 64 (SQE)   <= 4096  -> q_depth <= 64
+ *   CQ ring bytes = q_depth * 16 (CQE)   <= 4096  -> q_depth <= 256
+ *
+ * 64 is the tighter of the two and is the largest value that lets
+ * NVM_ADD_USER_QUEUE work out-of-the-box.  Operators who want
+ * deeper rings can pass io_queue_depth=N on insmod (or write it to
+ * sysfs before bind, since it is only consumed at probe), but they
+ * must either (a) only use kernel-managed IOQs (legacy path, which
+ * uses dma_alloc_coherent and is unaffected) or (b) wait for the
+ * planned PC=0 + PRP-List extension to land in adapter_alloc_sq_user.
+ */
+static unsigned int io_queue_depth = 64;
 module_param_cb(io_queue_depth, &io_queue_depth_ops, &io_queue_depth, 0644);
-MODULE_PARM_DESC(io_queue_depth, "set io queue depth, should >= 2 and < 4096");
+MODULE_PARM_DESC(io_queue_depth,
+	"set io queue depth, should >= 2 and < 4096; default 64 because user "
+	"IOQ rings (NVM_ADD_USER_QUEUE) must fit in a single 4K page");
 
 static int io_queue_count_set(const char *val, const struct kernel_param *kp)
 {
@@ -5451,6 +5474,101 @@ rollback_unlocked:
 
 			pr_info("snvme: NVM_SET_KERNEL_IOQ_CAP cap=%u (legacy ioq_num=%u, use_sreg=%u left unchanged)\n",
 				cap, ctrl->ioq_num, ctrl->use_sreg);
+			ret = 0;
+			break;
+		}
+		case NVM_RAW_ADMIN_CMD: {
+			/*
+			 * Pass-through admin SQE forwarder.  Used by userspace
+			 * (NVMeService, smoke tests) to drive per-queue recycle
+			 * (Delete + Create I/O SQ/CQ; NVMe 1.4 §5.4/§5.5) and
+			 * any other admin command that snvme does not need a
+			 * dedicated ioctl for.
+			 *
+			 * Restrictions:
+			 *   - controller must be probed/bound: ctrl->pdev's
+			 *     drvdata == valid struct nvme_dev with admin_q.
+			 *     We surface -ENODEV otherwise so userspace knows
+			 *     the bind step is missing.
+			 *   - data-buffer admin commands are NOT supported in
+			 *     this revision: we always hand __snvme_submit_sync_cmd
+			 *     buffer=NULL, bufflen=0.  Add a follow-up path if
+			 *     Get Log Page / Set Features with payload is ever
+			 *     needed (signal via reserved fields in the UAPI
+			 *     struct so the _IOC_SIZE stays stable).
+			 *
+			 * We do NOT inspect the opcode -- this is deliberately
+			 * a generic forwarder.  The caller is expected to be a
+			 * privileged daemon that knows what it is sending.
+			 */
+			struct nvm_ioctl_raw_admin admin_req;
+			struct nvme_command nvme_cmd;
+			union nvme_result nvme_res;
+			int admin_ret;
+			void __user *argp = (void __user *)arg;
+
+			if (copy_from_user(&admin_req, argp, sizeof(admin_req)))
+				return -EFAULT;
+
+			/*
+			 * Same liveness rule as NVM_ADD_USER_QUEUE: only forward
+			 * admin commands when snvme actually owns this BDF.
+			 * pci_get_drvdata alone would happily return the in-tree
+			 * nvme driver's nvme_dev pre-bind, which would be a
+			 * cross-driver admin_q hijack.
+			 */
+			ndev = snvm_ctrl_get_live_ndev(ctrl);
+			if (!ndev) {
+				pr_warn("snvme: NVM_RAW_ADMIN_CMD on unbound controller (BDF=%04x:%02x:%02x.%x)\n",
+					pci_domain_nr(ctrl->pdev->bus),
+					ctrl->pdev->bus->number,
+					PCI_SLOT(ctrl->pdev->devfn),
+					PCI_FUNC(ctrl->pdev->devfn));
+				return -ENODEV;
+			}
+
+			BUILD_BUG_ON(sizeof(admin_req.sqe) != sizeof(nvme_cmd));
+			memcpy(&nvme_cmd, admin_req.sqe, sizeof(nvme_cmd));
+			memset(&nvme_res, 0, sizeof(nvme_res));
+
+			/*
+			 * NOTE: the 5.15 __snvme_submit_sync_cmd has no trailing
+			 * `bool poll` argument (the 5.4 variant did) -- the admin
+			 * queue completion is delivered via interrupt here.
+			 */
+			admin_ret = __snvme_submit_sync_cmd(ndev->ctrl.admin_q,
+							   &nvme_cmd, &nvme_res,
+							   NULL, 0,
+							   0, NVME_QID_ANY, 0,
+							   0);
+			/*
+			 * Per __snvme_submit_sync_cmd contract:
+			 *   admin_ret == 0      -> success, result populated
+			 *   admin_ret < 0       -> Linux errno; CQE never arrived
+			 *   admin_ret > 0       -> NVMe spec status code
+			 *                          (SC|SCT|...); CQE arrived but
+			 *                          controller rejected the cmd
+			 *
+			 * We surface (>0) as ioctl success with nvme_status set
+			 * so userspace can pattern-match on NVMe SC values
+			 * (e.g. 0x01 "Invalid Command Opcode" for a controller
+			 * that does not implement an opcode we sent).  Negative
+			 * (transport) errors stay -errno.
+			 */
+			if (admin_ret < 0) {
+				admin_req.nvme_status = 0;
+				admin_req.result_dw0  = 0;
+				admin_req.result_dw1  = 0;
+				if (copy_to_user(argp, &admin_req, sizeof(admin_req)))
+					return -EFAULT;
+				return admin_ret;
+			}
+			admin_req.nvme_status = (uint16_t)(admin_ret & 0xFFFF);
+			admin_req.result_dw0  = le32_to_cpu(nvme_res.u32);
+			admin_req.result_dw1  = 0;     /* spec reserves DW1 for most admin cmds */
+
+			if (copy_to_user(argp, &admin_req, sizeof(admin_req)))
+				return -EFAULT;
 			ret = 0;
 			break;
 		}
