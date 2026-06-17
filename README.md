@@ -4,3 +4,5 @@ storage software stack`: a unified storage runtime where CPU and GPU paths
 cooperate on top of a shared memory subsystem and a pluggable backend SPI.
 
 The active architecture baseline is tracked in [`Roadmap.md`](Roadmap.md).
+
+See [`doc/build_and_test.md`](doc/build_and_test.md) for build instructions and SNVMe driver testing.
