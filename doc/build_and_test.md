@@ -225,6 +225,26 @@ sudo ./snvme_smoke_io      $TGT
 
 `snvme_smoke_io` returning 0 is the **authoritative CPU-side gate** — it's what catches the vaddr-mask and cap-after-MSI-X regressions.
 
+### If 6a or 6c fails with "no room for user queues"
+
+`snvme_smoke_addq` and `snvme_smoke_io` cap kernel-side IOQs to 36 by default (`NVM_SET_KERNEL_IOQ_CAP`), reserving the rest of the controller's grant for user queues. Some controllers grant few total IOQs; in that case the default cap ≥ the grant, the kernel consumes every queue, and `NVM_ADD_USER_QUEUE` fails.
+
+Fix: set `SNVME_TEST_KERNEL_IOQ_CAP` to a value strictly less than the controller's grant before running:
+
+```bash
+# Check how many IOQs the controller actually granted (look for max_user_qid):
+sudo ./snvme_smoke_addq $TGT
+
+sudo ./snvme_ubind $TGT
+```
+
+```bash
+# If max_user_qid == 0 (no room), re-run with a smaller cap.
+# Example for a 31-queue controller — cap at 16 to leave 15 for userspace:
+SNVME_TEST_KERNEL_IOQ_CAP=16 sudo ./snvme_smoke_addq $TGT
+SNVME_TEST_KERNEL_IOQ_CAP=16 sudo ./snvme_smoke_io   $TGT
+```
+
 ---
 
 ## Step 7 — GPU tests (only if the NVIDIA driver is loaded)

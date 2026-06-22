@@ -241,11 +241,35 @@ int main(int argc, char** argv) {
     /* nvme_max_io_queues() is capped.                                    */
     /* ------------------------------------------------------------------ */
     {
+        /*
+         * Cap is overridable via SNVME_TEST_KERNEL_IOQ_CAP so the test can
+         * run on controllers whose total I/O-queue grant is smaller
+         * than the 36 default.  The cap only leaves room for user
+         * queues when it is STRICTLY LESS than the controller grant
+         * (ctrl_max_io_queues == max_user_qid): the kernel keeps
+         * [1..cap] and the user pool gets [cap+1..max_user_qid].
+         *
+         * Example: a drive that grants only 31 IOQs (NVMe feature 0x07
+         * NCQA=0x1e) needs e.g. SNVME_TEST_KERNEL_IOQ_CAP=16 -- the default
+         * 36 >= 31 never triggers the kernel-side shrink, so the kernel
+         * consumes all 31 queues and step 9 fails with
+         * "max_user_qid <= start_cq_idx; no room for user queues".
+         */
         uint32_t cap = 36;
+        const char *cap_env = getenv("SNVME_TEST_KERNEL_IOQ_CAP");
+        if (cap_env != NULL && cap_env[0] != '\0') {
+            char *end = NULL;
+            unsigned long v = strtoul(cap_env, &end, 0);
+            if (end == cap_env || *end != '\0' || v == 0 || v > UINT32_MAX)
+                step_fail(0, "SNVME_TEST_KERNEL_IOQ_CAP=\"%s\" is not a positive "
+                             "integer", cap_env);
+            cap = (uint32_t)v;
+        }
         if (ioctl(fd_dev, NVM_SET_KERNEL_IOQ_CAP, &cap) != 0)
             step_fail(errno, "NVM_SET_KERNEL_IOQ_CAP cap=%u failed", cap);
-        step_ok("NVM_SET_KERNEL_IOQ_CAP cap=%u (kernel will get <=%u IOQs, "
-                "rest of controller grant goes to user pool)", cap, cap);
+        step_ok("NVM_SET_KERNEL_IOQ_CAP cap=%u%s (kernel will get <=%u IOQs, "
+                "rest of controller grant goes to user pool)",
+                cap, cap_env ? " [from SNVME_TEST_KERNEL_IOQ_CAP]" : "", cap);
     }
 
     /* ============================================================== */
@@ -293,7 +317,7 @@ int main(int argc, char** argv) {
         /* It's OK if both are zero on a controller that gave us no
          * room for user queues at all -- the next add will -EBUSY. */
         step_fail(0, "NVM_GET_DEV_INFO: max_user_qid (%u) <= start_cq_idx (%u); "
-                     "no room for user queues",
+                     "no room for user queues, please set SNVME_TEST_KERNEL_IOQ_CAP to a small value.",
                   info.max_user_qid, info.start_cq_idx);
     if (info.max_queues_per_group == 0)
         step_fail(0, "NVM_GET_DEV_INFO: max_queues_per_group == 0");
