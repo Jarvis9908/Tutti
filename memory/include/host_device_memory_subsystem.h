@@ -54,18 +54,20 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "memory_kind.h"
 #include "memory_region.h"
 #include "memory_subsystem.h"
+#include "prp_page_cache.h"
 
 #include <nvm_types.h>   // nvm_ctrl_t, nvm_dma_t
 
 namespace tutti {
 
-struct Device;   // runtime/include/device.h -- forward-decl mirrored
+struct Device;   // coordinator/include/device.h -- forward-decl mirrored
                  // here so this header doesn't need to pull in the
                  // full Device definition.
 
@@ -84,6 +86,27 @@ public:
 
     void              bind_devices(
         const std::vector<const Device*>& devices) override;
+
+    /// C-1: Configure PRP-page cache budgets.  Must be called BEFORE
+    /// bind_devices() (which initializes the cache).  If not called,
+    /// defaults from PrpPageCache::Config are used.
+    void configure_prp_pool(uint64_t l1_budget_bytes,
+                             uint64_t l2_budget_bytes) {
+        prp_l1_budget_ = l1_budget_bytes;
+        prp_l2_budget_ = l2_budget_bytes;
+    }
+
+    /// C-1/C-2: Ensure every PRP-list page backing the given registered
+    /// regions is GPU-resident (L1) and its owning descriptor's prp2 is
+    /// patched to the current L1 IOVA, ordered on `stream`.  MUST be
+    /// called by the io_engine for the batch's regions right before the
+    /// NVMe kernel launch (same stream), so the controller sees valid
+    /// PRP-list IOVAs.  Regions whose PRP pages are NOT cache-managed
+    /// (owned-fallback path, or granularity with no PRP list) are
+    /// skipped.  Returns false if the batch's PRP working set exceeds
+    /// L1 capacity or a page was never admitted.
+    bool ensure_prp_pages_resident(const std::vector<MemoryRegion*>& regions,
+                                   cudaStream_t stream) override;
 
     MemoryRegion* allocate_host(std::size_t size, MemoryKind kind) override;
     MemoryRegion* allocate_device(std::size_t size,
@@ -123,6 +146,15 @@ public:
 
     /// Number of regions currently tracked.
     std::size_t region_count() const;
+
+    /// C-3: Human-readable description of the last register_tensor
+    /// failure (empty string if the last call succeeded).  Useful
+    /// for production paths (Coordinator) to log WHY register_tensor
+    /// returned nullptr, instead of a bare nullptr.
+    const char* last_register_error() const {
+        return last_register_error_.empty() ? nullptr
+                                             : last_register_error_.c_str();
+    }
 
     /// Test-friendly query: does `region` have a DMA mapping for
     /// `device`?  Returns the per-page IO address count via
@@ -168,17 +200,56 @@ private:
 
         // PRP-list buffer (GPU memory, owned by this table).
         // nullptr when no IO needs a PRP list.
-        void*                       prp_list_devptr = nullptr;
-        std::size_t                 prp_list_bytes  = 0;
-        // Single DMA handle for prp_list_devptr (see deployment
-        // contract above).  nullptr when no IO needs a PRP list.
+        //
+        // INVARIANTS (enforced by build_io_slice_table_locked):
+        //   1. `prp_list_bytes` is rounded up to a multiple of
+        //      GPU_PAGE_SIZE (64 KiB) -- snvme.ko's
+        //      NVM_MAP_DEVICE_MEMORY ioctl requires the buffer
+        //      size to be a multiple of GPU_PAGE_SIZE.
+        //   2. `prp_list_devptr` is 64 KiB-aligned -- snvme.ko's
+        //      nvfs_nvidia_p2p_get_pages otherwise rounds the
+        //      vaddr DOWN to the nearest GPU page boundary,
+        //      producing IOVAs that point BEFORE the actual
+        //      buffer.  cudaMalloc returns sub-page-aligned
+        //      pointers for sub-64 KiB allocations, so the
+        //      builder over-allocates by GPU_PAGE_SIZE and tracks
+        //      the raw pointer below for the matching cudaFree.
+        //
+        // These fields are used ONLY on the owned-fallback path (see
+        // prp_cached below): when the PRP-page cache is unavailable or
+        // its L2 backing store is exhausted, the tensor falls back to
+        // an independent, always-GPU-resident PRP buffer -- exactly the
+        // pre-C-1 behaviour.  nullptr/0 when the cache path is used.
+        void*                       prp_list_devptr = nullptr;  // aligned
+        void*                       prp_list_raw    = nullptr;  // for cudaFree
+        std::size_t                 prp_list_bytes  = 0;        // aligned size
+        // Single DMA handle for prp_list_devptr.  nullptr when no IO
+        // needs a PRP list OR when the cache path is used.
         nvm_dma_t*                  prp_list_dma    = nullptr;
+
+        // C-1: when true, this tensor's total_ios PRP-list pages are
+        // managed by prp_cache_ (paged L2<->L1 on demand), keyed by
+        // &d_all_descriptors[io_idx].prp2.  free_io_slice_table_locked
+        // then calls prp_cache_.erase() over those keys instead of
+        // unmapping/freeing an owned buffer.  When false and
+        // prp_list_dma != nullptr, the owned-fallback fields above hold
+        // an independently-allocated always-resident buffer.
+        bool                        prp_cached = false;
     };
 
     struct Slot {
         std::unique_ptr<MemoryRegion> region;
         bool        owns_host_alloc   = false;
         bool        owns_device_alloc = false;
+
+        // When allocate_device over-allocates to guarantee page
+        // alignment (cudaMalloc only promises 256 B), raw_device_ptr
+        // holds the original cudaMalloc return for the matching
+        // cudaFree in erase_locked.  nullptr when the device_ptr IS
+        // the cudaMalloc return (e.g. register_device caller-supplied
+        // buffers, or allocations that happened to be page-aligned).
+        // Same pattern as IoSliceTable::prp_list_raw.
+        void*       raw_device_ptr    = nullptr;
 
         // Single kernel-side DMA registration handle for the data
         // buffer.  Created lazily by register_tensor (one
@@ -209,7 +280,8 @@ private:
 
     MemoryRegion* register_into_table(std::unique_ptr<MemoryRegion> r,
                                        bool owns_host_alloc,
-                                       bool owns_device_alloc);
+                                       bool owns_device_alloc,
+                                       void* raw_device_ptr = nullptr);
     void          erase_locked(uint64_t region_id);
 
     /// Find the slot that owns `ptr` (host or device pointer).
@@ -255,6 +327,21 @@ private:
     std::vector<const Device*>             bound_devices_;
     std::size_t                            cluster_page_size_ = 0;
     std::size_t                            cluster_min_mdts_  = 0;
+
+    // C-1: Two-tier PRP-page cache (host-pinned L2 backing store + GPU
+    // DMA-mapped L1 working set).  Initialized in bind_devices().
+    // register_tensor admits each PRP page into L2; the io_engine calls
+    // ensure_prp_pages_resident() before each batch to promote the
+    // batch's pages into L1 and patch their prp2.  Eliminates both the
+    // 64 KiB per-tensor alignment waste AND the "every PRP page pinned
+    // in GPU memory forever" cost.
+    PrpPageCache                           prp_cache_;
+    uint64_t                               prp_l1_budget_ = 0;  // 0 = use default
+    uint64_t                               prp_l2_budget_ = 0;
+    int                                    prp_cuda_device_ = 0;
+
+    // C-3: Last register_tensor failure description (empty on success).
+    std::string                            last_register_error_;
 };
 
 } // namespace tutti

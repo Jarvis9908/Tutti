@@ -24,7 +24,7 @@
  * And confirms the legacy entry points (nvm_dma_map_host / _device /
  * _queue_device) still travel the same wire layout they did pre-B6 --
  * map_kind == NVM_MAP_KIND_UNSPECIFIED takes the kernel's legacy
- * fallback branch -- so existing callers (Controller, libgeminifs)
+ * fallback branch -- so existing callers (Controller, libtutti)
  * keep working bit-for-bit during the migration.
  *
  * What it does NOT do

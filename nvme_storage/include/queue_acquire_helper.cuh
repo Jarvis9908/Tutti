@@ -6,7 +6,7 @@
  *
  * Layer: nvme_storage (R5b).
  *
- * Verbatim port of legacy filesystems/ext4/libgeminifs/include/helper.cuh:
+ * Verbatim port of the legacy on-GPU queue helper (pre-refactor):
  *
  *   - acquire_queue:  hash-only.  No actual locking, no release path
  *                     needed.  We rely on libnvm's get_cid/put_cid

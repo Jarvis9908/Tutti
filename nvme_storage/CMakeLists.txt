@@ -14,6 +14,9 @@
 #                           submit_read_one verifying byte content.
 #
 # Depends on:
+#   tutti_memory          -- GpuSlotPool<NvmeFileDeviceHandle> (async,
+#                            stream-ordered handle pooling; see
+#                            memory/include/gpu_slot_pool.h).
 #   tutti_device_manager  -- for LocalNvmeDevice payload + the two
 #                            registry impls used in smokes.
 #   libnvm                -- pulled by R5b for ctrl.h Controller wrap +
@@ -40,6 +43,8 @@ target_include_directories(tutti_nvme_storage
 target_link_libraries(tutti_nvme_storage
     PUBLIC
         tutti_device_manager
+        tutti_memory             # GpuSlotPool (header-only, PUBLIC so
+                                  # block_storage's #include also resolves)
     PRIVATE
         libnvm                  # R5b: Controller (ctrl.h) for d_qps access
         CUDA::cudart            # R5b: cudaMalloc / cudaMemcpy / cudaFree
@@ -55,78 +60,10 @@ set_target_properties(tutti_nvme_storage PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# Smoke (R5a, host-side)
+# Smoke tests live in the top-level examples/ tree (R9.4).
 # ---------------------------------------------------------------------------
-
-add_executable(nvme_storage_smoke
-    test/nvme_storage_smoke.cu
-)
-
-target_link_libraries(nvme_storage_smoke
-    PRIVATE
-        tutti_nvme_storage
-        tutti_device_manager
-        libnvm
-        CUDA::cudart
-)
-
-set_target_properties(nvme_storage_smoke PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    BUILD_RPATH   "$ORIGIN/../lib"
-    INSTALL_RPATH "$ORIGIN/../lib"
-)
-
-# ---------------------------------------------------------------------------
-# Smoke (R5b, GPU device-side submit)
-# ---------------------------------------------------------------------------
-
-add_executable(nvme_storage_gpu_smoke
-    test/nvme_storage_gpu_smoke.cu
-)
-
-target_link_libraries(nvme_storage_gpu_smoke
-    PRIVATE
-        tutti_nvme_storage
-        tutti_device_manager
-        libnvm
-        CUDA::cudart
-)
-
-set_target_properties(nvme_storage_gpu_smoke PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    BUILD_RPATH   "$ORIGIN/../lib"
-    INSTALL_RPATH "$ORIGIN/../lib"
-)
-
-# ---------------------------------------------------------------------------
-# Smoke (R5a.1, bulk-init perf + recovery)
-# ---------------------------------------------------------------------------
-
-add_executable(nvme_storage_bulk_smoke
-    test/nvme_storage_bulk_smoke.cu
-)
-
-target_link_libraries(nvme_storage_bulk_smoke
-    PRIVATE
-        tutti_nvme_storage
-        tutti_device_manager
-        libnvm
-        CUDA::cudart
-)
-
-set_target_properties(nvme_storage_bulk_smoke PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    BUILD_RPATH   "$ORIGIN/../lib"
-    INSTALL_RPATH "$ORIGIN/../lib"
-)
 
 install(TARGETS tutti_nvme_storage      DESTINATION "lib")
-install(TARGETS nvme_storage_smoke      DESTINATION "bin")
-install(TARGETS nvme_storage_gpu_smoke  DESTINATION "bin")
-install(TARGETS nvme_storage_bulk_smoke DESTINATION "bin")
 install(DIRECTORY include/ DESTINATION "include/tutti/nvme_storage"
         FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY include/ DESTINATION "include/tutti/nvme_storage"

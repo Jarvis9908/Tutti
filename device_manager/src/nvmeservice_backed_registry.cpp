@@ -78,6 +78,13 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
         std::fprintf(stderr, "[svc-registry] Connect rejected\n");
         return false;
     }
+    std::fprintf(stderr,
+        "[svc-registry] connect ok: daemon_dev=%d cuda=%d granted=%d "
+        "snvme=%s bar0=%llu page=%u blk=%u qdepth=%u\n",
+        req.daemon_device_id, req.cuda_device, sess->granted_queues,
+        sess->snvme_dev_path.c_str(),
+        (unsigned long long)sess->bar0_size, sess->page_size,
+        sess->blk_size, sess->queue_depth);
 
     auto bp = std::make_unique<LocalNvmeDevice>();
     bp->device_id        = device_id;
@@ -107,39 +114,58 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
         // sess goes out of scope and Disconnects automatically.
         return false;
     }
+    std::fprintf(stderr,
+        "[svc-registry] attach_client ok: ctrl=%p\n", (void*)bp->ctrl);
 
-    // Pull max_user_qid / max_queues_per_group from nvm_ctrl_t (these
-    // were populated during attach via the kernel's reflection of
-    // NVM_GET_DEV_INFO).
-    bp->max_user_qid         = bp->ctrl->max_user_qid;
-    bp->max_queues_per_group = bp->ctrl->max_queues_per_group;
+    // Stamp the RPC-provided q_depth onto the client ctrl.  A ctrl
+    // produced by nvm_ctrl_attach_client never ran NVM_GET_DEV_INFO,
+    // so ctrl->q_depth is ZERO here; the daemon discovered it and
+    // handed it over via the gRPC session (copied into bp->queue_depth
+    // above).  Downstream shared code -- NvmeQueueGroup::init_ and the
+    // QueuePair(B3) ctor -- reads ctrl->q_depth to size the SQ/CQ
+    // rings, so it MUST be non-zero before we build the queue group
+    // (this matches the role smoke's "in a real client this comes from
+    // RPC" contract).  The user-QID pool bounds (max_user_qid /
+    // start_cq_idx) intentionally stay zero -- they are not knowable
+    // client-side; NvmeQueueGroup::init_ treats zero as "client mode,
+    // trust the daemon grant + kernel ADD_USER_QUEUE enforcement".
+    bp->ctrl->q_depth = (uint16_t) bp->queue_depth;
 
-    // CTRL.MDTS (max single-IO transfer size) is NOT carried on the
-    // gRPC session payload today, and nvm_ctrl_attach_client doesn't
-    // surface it on the bare nvm_ctrl_t.  Fetch it directly from the
-    // kernel via NVM_GET_DEV_INFO on our own attached fd; the bind
-    // is already complete on the daemon side, so this is a single
-    // ioctl with no real polling.  Failure is non-fatal: leaves
-    // bp->max_data_size at 0 and the caller's caps.max_io_bytes at
-    // 0, which downstream code (memory/, block_storage) will treat
-    // as "unknown, use a conservative default".
-    {
-        struct nvm_ioctl_dev info;
-        std::memset(&info, 0, sizeof(info));
-        int rc_info = nvm_wait_dev_info(bp->ctrl, &info, /*timeout_ms=*/100);
-        if (rc_info != 0) {
-            std::fprintf(stderr,
-                "[svc-registry] nvm_wait_dev_info(daemon_dev=%d) rc=%d; "
-                "max_data_size will be 0\n",
-                req.daemon_device_id, rc_info);
-        } else {
-            bp->max_data_size = info.max_data_size;
-        }
-    }
+    // IMPORTANT: a service-client ctrl is produced by
+    // nvm_ctrl_attach_client(), which by contract does NOT run
+    // NVM_GET_DEV_INFO (libnvm device.cpp: "the disk metadata is not
+    // the client's concern; the daemon already told the client what
+    // to use via RPC").  Consequently the B3 dev-info fields on the
+    // bare client ctrl -- max_user_qid / max_queues_per_group /
+    // q_depth / bar0_size / max_data_size -- are all ZERO here, and
+    // we MUST NOT call nvm_wait_dev_info() on the client fd: issuing
+    // NVM_GET_DEV_INFO from the client faults on this kernel.  All
+    // device metadata we need comes from the gRPC session payload
+    // (copied into bp above): page_size / blk_size / namespace_id /
+    // queue_depth / granted_queues / max_data_size.
+    //
+    // max_user_qid / max_queues_per_group are NOT carried on the
+    // session, so they stay 0.  They are informational for the client
+    // path: the kernel allocates user QIDs from its own pool on
+    // NVM_ADD_USER_QUEUE (the daemon fixed the cap at bring-up), and
+    // NvmeQueueGroup::init_ treats a zero pool bound as "client mode".
+    // max_data_size (CTRL.MDTS) IS carried now -- the memory subsystem's
+    // bind_devices() rejects a device whose caps.max_io_bytes == 0, so
+    // the client must surface the daemon-discovered MDTS here.
+    bp->max_user_qid         = 0;
+    bp->max_queues_per_group = 0;
+    bp->max_data_size        = (size_t) sess->max_data_size;
 
     // Service-mode bookkeeping: store the session so dtor knows to
     // Disconnect it.
-    bp->service_session_opaque = sess.get();
+    //
+    // NOTE: sess.release() empties the local unique_ptr but does NOT
+    // destroy the Session object (ownership just moves into out.session).
+    // Keep a raw alias so the build_queue_group block below can still
+    // read session fields -- dereferencing `sess` after release() would
+    // be a null deref (segfault at the field offset).
+    nvmeservice::NvmeServiceClient::Session* sess_raw = sess.get();
+    bp->service_session_opaque = sess_raw;
     out.session                = sess.release();   // ownership now in Slot
 
     // Runtime-visible Device shell.
@@ -147,8 +173,6 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
     out.device.backend_type    = BackendType::LOCAL_NVME;
     out.device.pci_addr        = bp->pci_addr;
     out.device.display_name    = bp->display_name;
-    out.device.backend         = nullptr;
-    out.device.queues          = nullptr;
     out.device.backend_private = bp.get();
 
     auto& caps = out.device.capabilities;
@@ -172,8 +196,8 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
     // any GPU memory or queue handles -- it only handed out the
     // chrdev/bind lease at Connect time.
     if (req.build_queue_group) {
-        const uint32_t granted = (uint32_t)(sess->granted_queues > 0
-                                            ? sess->granted_queues
+        const uint32_t granted = (uint32_t)(sess_raw->granted_queues > 0
+                                            ? sess_raw->granted_queues
                                             : (req.num_queues > 0 ? req.num_queues : 4));
         const uint32_t nq = req.num_user_queues > 0
                             ? std::min<uint32_t>(req.num_user_queues, granted)
@@ -216,6 +240,11 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
         std::snprintf(d.disk_name, sizeof(d.disk_name),
                       "%sn%u", tail, ns_id);
 
+        std::fprintf(stderr,
+            "[svc-registry] building queue group: nq=%u qd=%u ns=%u "
+            "disk=%s page=%u blk=%u\n",
+            nq, qd, ns_id, d.disk_name, d.page_size, d.block_size);
+
         try {
             bp->queue_group = std::make_shared<NvmeQueueGroup>(
                 bp->ctrl,
@@ -232,8 +261,13 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
             bp->ctrl = nullptr;
             return false;
         }
+        std::fprintf(stderr,
+            "[svc-registry] queue group ok: n_qps=%u group_id=%u\n",
+            bp->queue_group->n_qps(), bp->queue_group->group_id());
     }
 
+    std::fprintf(stderr,
+        "[svc-registry] open_one done: device_id=%d\n", device_id);
     out.backend_private = std::move(bp);
     return true;
 }

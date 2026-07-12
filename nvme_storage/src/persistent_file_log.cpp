@@ -81,6 +81,7 @@ bool PersistentFileLog::load_or_init(std::string log_path) {
     log_path_ = std::move(log_path);
     entries_.clear();
     name_to_index_.clear();
+    id_to_index_.clear();
     next_file_id_ = 1;
     return load_locked();
 }
@@ -149,6 +150,7 @@ bool PersistentFileLog::load_locked() {
 
         const std::size_t idx = entries_.size();
         name_to_index_[e.name] = idx;
+        id_to_index_[e.file_id] = idx;
         entries_.push_back(std::move(e));
     }
 
@@ -177,33 +179,29 @@ bool PersistentFileLog::add(Entry e) {
     if (name_to_index_.count(e.name) != 0) return false;
     const std::size_t idx = entries_.size();
     name_to_index_[e.name] = idx;
+    id_to_index_[e.file_id] = idx;
     if (e.file_id >= next_file_id_) next_file_id_ = e.file_id + 1;
     entries_.push_back(std::move(e));
     return true;
 }
 
 bool PersistentFileLog::remove(uint64_t file_id) {
-    // Linear scan to find the entry by file_id, then swap-and-pop
-    // to avoid the O(N) std::vector::erase + index rebuild that
-    // the original implementation incurred on every delete (which
-    // turned cleanup of N files into O(N^2) memory traffic).
-    //
-    // Stable insertion order is NOT a public invariant of this
-    // log -- on-disk recovery (load_or_init) and find_by_name
-    // both ignore order -- so swap-and-pop is safe here.
-    for (std::size_t i = 0; i < entries_.size(); ++i) {
-        if (entries_[i].file_id == file_id) {
-            name_to_index_.erase(entries_[i].name);
-            const std::size_t last = entries_.size() - 1;
-            if (i != last) {
-                entries_[i] = std::move(entries_[last]);
-                name_to_index_[entries_[i].name] = i;
-            }
-            entries_.pop_back();
-            return true;
-        }
+    // O(1) via id_to_index_ hash map.  Swap-and-pop keeps the
+    // vector compact; the swapped-in tail entry's index maps are
+    // updated to reflect its new position.
+    auto it = id_to_index_.find(file_id);
+    if (it == id_to_index_.end()) return false;
+    const std::size_t idx = it->second;
+    name_to_index_.erase(entries_[idx].name);
+    id_to_index_.erase(it);
+    const std::size_t last = entries_.size() - 1;
+    if (idx != last) {
+        entries_[idx] = std::move(entries_[last]);
+        name_to_index_[entries_[idx].name] = idx;
+        id_to_index_[entries_[idx].file_id] = idx;
     }
-    return false;
+    entries_.pop_back();
+    return true;
 }
 
 bool PersistentFileLog::persist() {

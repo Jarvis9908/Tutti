@@ -104,6 +104,7 @@ struct ConnectGrant {
     std::string mount_path;
     uint32_t    heartbeat_interval_sec = 0;
     uint32_t    lease_timeout_sec      = 0;
+    uint64_t    max_data_size          = 0;   // CTRL.MDTS in bytes
 };
 
 // -----------------------------------------------------------------
@@ -135,6 +136,7 @@ struct DeviceState {
     uint32_t                 queue_depth          = 0;
     uint32_t                 max_user_qid         = 0;
     uint32_t                 max_queues_per_group = 0;
+    size_t                   max_data_size        = 0;   // CTRL.MDTS in bytes
 
     // Owner-side libnvm handle.  Held for the daemon's lifetime to
     // keep the chrdev / bind alive.  Freed via nvm_ctrl_free in

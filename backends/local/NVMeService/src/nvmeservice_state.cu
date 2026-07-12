@@ -141,6 +141,7 @@ void ServiceState::init_device(const NvmeEntry& nvme, int32_t device_id) {
     dev.max_queues_per_group = ctrl->max_queues_per_group;
     dev.page_size            = ctrl->page_size;
     dev.queue_depth          = ctrl->q_depth;
+    dev.max_data_size        = disk.max_data_size;   // CTRL.MDTS in bytes
     dev.blk_size             = static_cast<uint32_t>(disk.block_size);
     if (dev.blk_size > 0) {
         dev.blk_size_log = static_cast<uint32_t>(__builtin_ctz(dev.blk_size));
@@ -378,6 +379,7 @@ ServiceState::ConnectResult ServiceState::connect(int32_t device_id,
     g.blk_size               = dev.blk_size;
     g.blk_size_log           = dev.blk_size_log;
     g.queue_depth            = dev.queue_depth;
+    g.max_data_size          = dev.max_data_size;
     auto it = dev.gpu_view_paths.find(cuda_device);
     if (it != dev.gpu_view_paths.end()) g.mount_path = it->second;
     g.heartbeat_interval_sec = cfg_.lease.heartbeat_interval_sec;

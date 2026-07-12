@@ -483,7 +483,7 @@ enum nvm_ioctl_type{
     /*
      * NVM_SET_IOQ_NUM now carries a struct nvm_ioctl_setup, NOT the
      * historical nvm_ioctl_map.  This is an ABI break vs.
-     * pre-Geminifs snvme-5.15-public binaries -- the project is
+     * pre-Tutti snvme-5.15-public binaries -- the project is
      * open-source and we deliberately do not keep the legacy
      * payload.  Any new userspace MUST populate nvm_ioctl_setup;
      * the ioctl number has the new _IOC_SIZE baked in, so a stale

@@ -27,6 +27,11 @@ temp/*
 # CodeBuddy / IDE assistant local state -- per-developer, not source.
 .codebuddy/
 
+# Smoke / stress test runtime logs (written next to the binary or repo
+# root; regenerated on every run).
+*.log
+kv_cache_e2e_stress.log
+
 # CMake user presets are per-developer (toolchain/CUDA paths etc.).
 # Commit CMakePresets.json deliberately if you ever need a shared baseline.
 CMakeUserPresets.json
@@ -40,8 +45,13 @@ backends/local/kernel_modules/test/snvme_smoke_addq
 backends/local/kernel_modules/test/snvme_smoke_qgroup
 backends/local/kernel_modules/test/snvme_smoke_recycle
 backends/local/kernel_modules/test/snvme_smoke_io
-backends/local/kernel_modules/test/snvme_ubind
 
 # Nsight Systems profile output -- per-run, not source.
 *.nsys-rep
 *.sqlite
+
+# Stress test sweep logs + stdout captures (per-run, not source)
+sweep_logs/
+
+# Exported chat history (not source)
+history_*.md

@@ -77,6 +77,28 @@ class  INvmeStorage;            // nvme_storage/include/nvme_storage.h
 
 using GpuFileId = uint32_t;
 
+/// Flags for the unified open_gpu_file() below -- mirrors
+/// nvme_storage.h's NvmeOpenFlags (POSIX open(2)-shaped).  EXISTING
+/// (0, the default) opens an already-created GpuFile by
+/// `spec.name` alone (every other GpuFileSpec field is ignored);
+/// CREATE additionally allocates one if `spec.name` doesn't exist
+/// yet (needs the full spec).  NO_PERSIST has no POSIX analogue --
+/// it's Tutti's bulk-init knob.
+enum GpuFileOpenFlags : uint32_t {
+    GPU_FILE_OPEN_EXISTING   = 0,        ///< fail if the GpuFile doesn't exist
+    GPU_FILE_OPEN_CREATE     = 1u << 0,  ///< create if missing (~O_CREAT)
+    GPU_FILE_OPEN_EXCL       = 1u << 1,  ///< with CREATE: fail if it already exists (~O_EXCL)
+    GPU_FILE_OPEN_NO_PERSIST = 1u << 2,  ///< with CREATE: defer gpu_file_log persist (bulk init)
+};
+
+/// Opaque stream handle -- same idea as nvme_storage.h's
+/// `GpuStreamHandle` (a distinct but layout-identical `void*` alias,
+/// so this header keeps its own "no CUDA" promise without including
+/// nvme_storage.h just for one typedef).  Callers holding a
+/// `cudaStream_t` pass `(GpuStreamHandle)stream`; the .cpp
+/// implementation `reinterpret_cast`s it back.
+using GpuStreamHandle = void*;
+
 /// Hard upper bound on the number of shards (== tensor_shape[0])
 /// per GpuFile.  Set to 4 because GPUs are typically PCIe x16 and
 /// modern NVMe are PCIe x4, so four parallel queues already saturate
@@ -131,7 +153,7 @@ struct GpuFileSpec {
 /// Host-side runtime view of an open GpuFile.
 ///
 /// Lifetime:
-///   - Created by IBlockStorage::create_gpu_file / open_gpu_file.
+///   - Created by IBlockStorage::open_gpu_file.
 ///   - Borrowed only; callers MUST NOT delete -- the storage owns
 ///     it and reclaims on close_gpu_file / shutdown.
 ///   - shards[] are NvmeFile* borrowed from nvme_storage (same
@@ -205,6 +227,36 @@ struct GpuFileHandle {
     /// simpler and avoids an extra GPU load per IO compared with a
     /// `d_shards_dev[shard_idx]` lookup.
     std::vector<NvmeFileDeviceHandle*> d_shards_host;
+
+    /// GPU-resident shard pointer table (R8; async pooled R11).
+    ///
+    /// `d_shards_dev` points at one slot of a
+    /// `GpuSlotPool<ShardPtrSlot>` (see host_fs_backed_block_storage.h
+    /// / memory/include/gpu_slot_pool.h) sized to `kGpuFileMaxShards`
+    /// (4) pointers regardless of `num_shards` -- only the first
+    /// `num_shards` entries are ever populated/read; the rest stay
+    /// null.  Element i carries the same value as `d_shards_host[i]`.
+    /// Populated by `acquire_device_handle` via an ASYNC H2D copy
+    /// queued on the caller's stream (no synchronous cudaMalloc on
+    /// the hot path -- the pool's backing memory is allocated once,
+    /// at first use per cuda device); released -- also asynchronously,
+    /// stream-ordered -- by `release_device_handle`.
+    ///
+    /// Why both `d_shards_host` and `d_shards_dev`?
+    ///   - `d_shards_host` is the source of truth and the canonical
+    ///     iterator surface for host code (lifetime / cleanup loops
+    ///     in `release_device_handle`).
+    ///   - `d_shards_dev` exists so io_engine kernels can do their
+    ///     own stripe selection on the GPU --
+    ///     `dh = entries[tid].shards[fd_idx]` -- exactly mirroring
+    ///     legacy `nvme_batch_xfer_kernel`'s indexing into
+    ///     `NVMeFilesSpan`. Pre-resolving the shard on the host
+    ///     would force one entry per (sub-slice, shard) and lose
+    ///     the GPU-parallel mod/div advantage.
+    ///
+    /// Kernels MUST NOT mutate this array. The pointer itself is
+    /// stable for the lifetime of the GpuFileHandle.
+    NvmeFileDeviceHandle** d_shards_dev = nullptr;
 };
 
 class IBlockStorage {
@@ -235,39 +287,70 @@ public:
     // Directory
     // ------------------------------------------------------------------
 
-    /// Create a new GpuFile.  Allocates one shard NvmeFile per
-    /// entry in spec.shard_placement using the underlying
-    /// INvmeStorage; spec.tensor_shape consistency is checked
-    /// before any nvme_storage state is touched.
+    /// POSIX open(2)-shaped: open an existing GpuFile by
+    /// `spec.name`, or (with `GPU_FILE_OPEN_CREATE`) create it if it
+    /// doesn't exist yet.
     ///
-    /// Bulk-init knob (default = single-file durable):
-    ///   persist_now == false defers the gpu_file_log rewrite AND
-    ///   passes persist_now/sync_now=false through to every
-    ///   underlying create_file.  Caller MUST follow up with
-    ///   flush_metadata() so both layers' logs and the host fs
-    ///   reach the platter.  Crash without that flush leaves
-    ///   ghost shards which bootstrap reconcile will unlink.
+    ///   flags == GPU_FILE_OPEN_EXISTING (default): open by
+    ///            `spec.name` alone -- every other GpuFileSpec field
+    ///            is ignored.  Opens every shard's NvmeFile (host fd
+    ///            reopened) via INvmeStorage::open_file.  Returns
+    ///            nullptr if not found.
+    ///
+    ///   flags & GPU_FILE_OPEN_CREATE: if `spec.name` doesn't exist,
+    ///            allocates one shard NvmeFile per entry in
+    ///            `spec.shard_placement` using the underlying
+    ///            INvmeStorage (`spec.tensor_shape` consistency is
+    ///            checked before any nvme_storage state is touched).
+    ///            If it ALREADY exists, behaves like EXISTING (the
+    ///            rest of `spec` is ignored) UNLESS
+    ///            `GPU_FILE_OPEN_EXCL` is also set, in which case
+    ///            that's a failure (nullptr), mirroring
+    ///            O_CREAT|O_EXCL.
+    ///
+    /// Bulk-init knob (only meaningful with CREATE; default when
+    /// unset = single-file durable):
+    ///   GPU_FILE_OPEN_NO_PERSIST  defers the gpu_file_log rewrite
+    ///            AND passes the NVME_OPEN_NO_PERSIST|NVME_OPEN_NO_SYNC
+    ///            bulk-init flags through to every underlying
+    ///            open_file(CREATE).  Caller MUST follow up with
+    ///            flush_metadata() so both layers' logs and the host
+    ///            fs reach the platter.  Crash without that flush
+    ///            leaves ghost shards which bootstrap reconcile will
+    ///            unlink.
     ///
     /// Returns nullptr on:
+    ///   - not-found (EXISTING)
+    ///   - already-exists (CREATE|EXCL)
     ///   - invalid spec (tensor_shape inconsistency, shard count
     ///     out of range, duplicate device in shard_placement, etc.)
-    ///   - name collision
-    ///   - any underlying create_file failure (rolls back all
-    ///     already-created shards).
+    ///   - any underlying open_file failure (rolls back all
+    ///     already-created shards)
     ///
-    /// Bulk-init pattern for LMCache (millions of KV blocks):
+    /// Bulk-init pattern for LMCache (millions of KV blocks) --
+    /// note this pattern doesn't keep the bulk-created GpuFiles
+    /// open (see close_gpu_file's doc comment on why that matters
+    /// for the handle metadata cache):
     /// @code
-    /// for (auto& s : specs)
-    ///     bs->create_gpu_file(s, /*persist_now=*/false);
+    /// for (auto& s : specs) {
+    ///     GpuFile* gf = bs->open_gpu_file(s, GPU_FILE_OPEN_CREATE |
+    ///                                        GPU_FILE_OPEN_NO_PERSIST);
+    ///     bs->close_gpu_file(gf);
+    /// }
     /// bs->flush_metadata();
     /// @endcode
-    virtual GpuFile* create_gpu_file(const GpuFileSpec& spec,
-                                     bool persist_now = true) = 0;
+    virtual GpuFile* open_gpu_file(const GpuFileSpec& spec,
+                                   uint32_t flags = GPU_FILE_OPEN_EXISTING) = 0;
 
-    /// Re-open an existing GpuFile by name; opens every shard's
-    /// NvmeFile (host fd reopened) via INvmeStorage::open_file.
-    /// Returns nullptr if not found.
-    virtual GpuFile* open_gpu_file(std::string_view name) = 0;
+    /// Batch create: creates `count` GpuFiles concurrently (multi-
+    /// threaded; FS operations run without the global mutex so they
+    /// genuinely parallelize at the NVMe level via R11.5's split-lock).
+    /// `flags` is typically GPU_FILE_OPEN_CREATE | GPU_FILE_OPEN_NO_PERSIST.
+    /// out[i] corresponds to specs[i]; nullptr on per-file failure.
+    /// Caller MUST call flush_metadata() once after the batch.
+    virtual std::vector<GpuFile*> open_gpu_files_batch(
+        const GpuFileSpec* specs, uint32_t count,
+        uint32_t flags = GPU_FILE_OPEN_CREATE) = 0;
 
     /// Close the GpuFile: closes every shard via
     /// INvmeStorage::close_file, persists the gpu_file_log on
@@ -285,6 +368,17 @@ public:
     /// regardless.
     virtual bool delete_gpu_file(GpuFile* file,
                                  bool persist_now = true) = 0;
+
+    /// Batch delete: flattens every file's shards into one
+    /// INvmeStorage::delete_files_batch call per participating
+    /// device (threaded there), then does the serial GpuFile-log
+    /// bookkeeping.  Always defers persist (bulk mode); caller MUST
+    /// call flush_metadata() once after the batch.  out_ok[i]
+    /// corresponds to files[i]; returns false if any file failed
+    /// (out_ok still filled for every i).
+    virtual bool delete_gpu_files_batch(GpuFile* const* files,
+                                        uint32_t         count,
+                                        bool*            out_ok) = 0;
 
     /// Flush all deferred metadata across all participating
     /// devices: rewrites every dirty gpu_file_log.bin AND calls
@@ -339,9 +433,106 @@ public:
     // alive.  In practice: don't outlive close_gpu_file or
     // INvmeStorage::shutdown.
     // ------------------------------------------------------------------
+    // GPU acquire (R6; async pooled R11)
+    //
+    // These DO NOT open or create the GpuFile -- the file must
+    // already be in the directory.  They produce a host-side
+    // "acquired" handle that bundles per-shard NvmeFileDeviceHandle*
+    // and a small GPU-resident pointer table (d_shards_dev).
+    //
+    // Naming intentionally avoids "open" so this isn't confused
+    // with the directory-level open_gpu_file.
+    //
+    // configure_handle_pool  MUST be called once, after bootstrap()
+    //                        and before the first acquire_device_handle,
+    //                        to size this layer's own
+    //                        GpuSlotPool<ShardPtrSlot> (the
+    //                        d_shards_dev pointer table, sized to
+    //                        `l1_capacity` GpuFiles -- this layer has
+    //                        no L2 tier of its own; ShardPtrSlot is
+    //                        cheap enough to always rebuild on
+    //                        demand, see host_fs_backed_block_storage.h)
+    //                        AND to forward capacities to the
+    //                        underlying INvmeStorage's
+    //                        configure_handle_pool (each shard's
+    //                        two-tier NvmeFileDeviceHandle cache).
+    //                        Unit mismatch note: `l1_capacity` /
+    //                        `l2_capacity` here count GpuFiles, but
+    //                        INvmeStorage's cache counts individual
+    //                        shard NvmeFiles -- this layer forwards
+    //                        `l1_capacity * kGpuFileMaxShards` /
+    //                        `l2_capacity * kGpuFileMaxShards`
+    //                        (worst case: every GpuFile uses the max
+    //                        shard count) so a batch of up to
+    //                        `l1_capacity` GpuFiles can always have
+    //                        every shard resident simultaneously.
+    //
+    // Semantics (R11.3):
+    //   acquire_device_handle   idempotent "ensure resident": for
+    //                           each shard NvmeFile, calls the
+    //                           underlying INvmeStorage's
+    //                           acquire_device_handle (near-free on a
+    //                           cache hit; queues an H2D copy only on
+    //                           a miss); then resolves/refreshes this
+    //                           GpuFile's own ShardPtrSlot (this
+    //                           layer's single-tier pool -- always
+    //                           rebuilds the slot's content, since a
+    //                           shard's underlying GPU pointer may
+    //                           have moved since the last call).
+    //                           Returns immediately; every field is
+    //                           only guaranteed valid for GPU work
+    //                           queued on `stream` AFTER this call
+    //                           (stream-ordering).
+    //
+    //                           Returns nullptr if any underlying
+    //                           acquire fails (with rollback of the
+    //                           ones already done) or this layer's
+    //                           own pool is exhausted.
+    //
+    //   release_device_handle   advisory "may downgrade now" hint --
+    //                           calls INvmeStorage::release_device_handle
+    //                           (also advisory) on every shard, and
+    //                           lets this layer's own ShardPtrSlot be
+    //                           LRU-evicted sooner.  Deletes the
+    //                           GpuFileHandle struct itself
+    //                           immediately (it's plain host memory,
+    //                           not GPU-resident).  No-op on nullptr.
+    //                           Idempotent.
+    //
+    // Lifetime: the returned handle is valid as long as every
+    // shard's NvmeFile is alive AND its device's queue_group is
+    // alive.  In practice: don't outlive close_gpu_file or
+    // INvmeStorage::shutdown.
+    // ------------------------------------------------------------------
 
-    virtual GpuFileHandle* acquire_device_handle (GpuFile* file)         = 0;
-    virtual void           release_device_handle(GpuFileHandle* handle)  = 0;
+    virtual bool configure_handle_pool(uint32_t l1_capacity, uint32_t l2_capacity) = 0;
+
+    virtual GpuFileHandle* acquire_device_handle (GpuFile* file, GpuStreamHandle stream) = 0;
+    virtual void           release_device_handle(GpuFileHandle* handle, GpuStreamHandle stream) = 0;
+
+    /// Batch variant: ensures every GpuFile in files[0..count) has a
+    /// resolved handle, doing ONE flattened INvmeStorage batch
+    /// acquire across every shard of every file instead of `count`
+    /// separate ones -- see nvme_storage.h's
+    /// acquire_device_handles_batch doc for why that matters when a
+    /// single caller (e.g. a KV-cache adapter resolving a whole
+    /// batch's distinct blocks) touches many files at once.
+    /// out_handles[i] corresponds to files[i]; each is heap-allocated
+    /// exactly like acquire_device_handle's return and must be freed
+    /// the same way (release_device_handle, or the caller's own
+    /// equivalent bookkeeping).
+    ///
+    /// Hard requirement: `count` MUST be <= this layer's own
+    /// l1_capacity (the ShardPtrSlot pool, in GpuFile units) -- every
+    /// file resolved by one batch call must stay resident for the
+    /// duration of the call, mirroring INvmeStorage's own batch
+    /// contract. Returns false (whole batch failed) on any per-file
+    /// failure; `out_handles` is left partially filled past the
+    /// failure point.
+    virtual bool acquire_device_handles_batch(GpuFile* const* files,
+                                              uint32_t         count,
+                                              GpuStreamHandle  stream,
+                                              GpuFileHandle**  out_handles) = 0;
 };
 
 } // namespace tutti

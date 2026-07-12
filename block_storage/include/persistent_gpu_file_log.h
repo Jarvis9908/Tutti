@@ -123,6 +123,7 @@ private:
     std::string                                  log_path_;
     std::vector<Entry>                           entries_;
     std::unordered_map<std::string, std::size_t> name_to_index_;
+    std::unordered_map<uint32_t, std::size_t>    id_to_index_;  // O(1) remove
     uint32_t                                     next_file_id_ = 1;
     uint64_t                                     generation_   = 0;
 };

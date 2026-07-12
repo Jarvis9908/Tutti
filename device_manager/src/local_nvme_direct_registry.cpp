@@ -124,8 +124,6 @@ bool LocalNvmeDirectRegistry::open_one(const LocalNvmeDirectConfig& cfg,
     out.device.backend_type     = BackendType::LOCAL_NVME;
     out.device.pci_addr         = bp->pci_addr;
     out.device.display_name     = bp->display_name;
-    out.device.backend          = nullptr;   // SPI impl wires this up later (R6)
-    out.device.queues           = nullptr;
     out.device.backend_private  = bp.get();
 
     // CapabilitySet shape for v0.1 -- bits we know are true today.

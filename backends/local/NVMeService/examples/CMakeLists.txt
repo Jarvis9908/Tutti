@@ -13,7 +13,7 @@ add_executable(nvmeservice_daemon_example
 target_link_libraries(nvmeservice_daemon_example PRIVATE
     nvmeservice
     libnvm
-    ${GEMINIFS_YAML_CPP_TARGET}
+    ${TUTTI_YAML_CPP_TARGET}
     gRPC::grpc++
     protobuf::libprotobuf
     Threads::Threads

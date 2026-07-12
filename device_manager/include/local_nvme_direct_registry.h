@@ -44,7 +44,7 @@
 
 #include "device_registry.h"
 #include "local_nvme_device.h"
-#include "../../runtime/include/device.h"
+#include "../../coordinator/include/device.h"
 
 namespace tutti {
 
@@ -107,10 +107,10 @@ public:
     /// if the host process forks at all (libnvm pulls in CUDA, which
     /// is fork-hostile).  Returns false on first failure; partial
     /// state is rolled back before returning.
-    bool Open();
+    bool Open() override;
 
     /// Close every controller in reverse-open order.  Idempotent.
-    void Close();
+    void Close() override;
 
     // ---- IDeviceRegistry ----------------------------------------
 

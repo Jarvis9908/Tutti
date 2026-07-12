@@ -123,6 +123,7 @@ message ConnectResponse {
     uint32  blk_size_log    = 23;
     uint32  queue_depth     = 24;
     uint32  dstrd           = 25;
+    uint64  max_data_size   = 26;   // CTRL.MDTS in bytes (per-IO transfer cap)
 
     // --- Lease parameters chosen by the daemon ---
     uint32  heartbeat_interval_sec = 30;

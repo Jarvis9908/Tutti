@@ -17,9 +17,41 @@
 #      kernel-space (reboot is the only safe option).
 #   3. Exit non-zero without touching insmod.
 #
-# Pass --force-cleanup to additionally SIGKILL anything holding
+# Pass --force-cleanup to additionally terminate anything holding
 # /dev/snvm* fds before rmmod.  Use sparingly; if a NVMeService
-# daemon is running this WILL kill it.
+# daemon is running this WILL kill it.  Termination is graceful-first
+# (SIGTERM, up to a 10s wait for the daemon's own chrdev/controller
+# teardown -- see NVMeService.md's "clean shutdown" sequence) and
+# only escalates to SIGKILL if the fd is still held afterwards.
+# SIGKILL-ing the daemon mid-teardown (or any -9 that bypasses this
+# script) can leave the kernel module's controller/chrdev state
+# leaked, which then makes rmmod fail with "Module snvme is in use"
+# and requires a host reboot to clear -- do not retry insmod in that
+# state (see the insmod failure message below).
+#
+# NOTE: a holder whose /proc/<pid>/exe shows "(deleted)" is NOT
+# necessarily stale -- that is the normal, harmless result of
+# rebuilding the daemon binary (cmake --build) while the daemon keeps
+# running against its old inode.  Verify liveness (ps -p <pid>, tail
+# its log for recent reaper/RPC activity) before assuming a holder is
+# safe to kill.
+#
+# IMPORTANT (kernel-refcount root cause, confirmed by reading
+# snvm_fops/snvm_dev_fops in the kernel_modules sources): the Linux
+# cdev framework auto-pairs try_module_get()/module_put() on every
+# open()/fd-close of /dev/snvm_control and /dev/ssnvme* regardless of
+# whether the driver defines its own .release -- so a SIGKILL'd
+# daemon does NOT by itself leak snvme's module refcount.  The two
+# refs that actually DO outlive the daemon (and that
+# SNVM_DEVICE_UNBIND/SNVM_CHRDEV_REMOVE never touch) are:
+#   1. the ext4 block device /dev/snvme<N>n<Y> being mount(2)'d
+#      (nvme_storage's HostFsBackedNvmeStorage owns this mount -- see
+#      mount_if_needed_locked/umount_locked); only umount(2) drops it.
+#   2. the RAW admin chardev /dev/snvme<N> (no leading 's') being open
+#      by some other process (nvme-cli, another daemon, ...).
+# This script now checks + surfaces both BEFORE rmmod (step 2b) --
+# check that output first; if it's empty and rmmod still says
+# "in use", THAT is the case with no known non-reboot recovery.
 #
 # Pass --no-insmod to only do unbind+rmmod (rebuild flow: edit code,
 # rmmod, build, insmod manually).
@@ -67,19 +99,75 @@ HOLDERS=$(sudo lsof /dev/snvm_control /dev/ssnvme* 2>/dev/null || true)
 if [ -n "$HOLDERS" ]; then
     echo "  Currently held by:"
     echo "$HOLDERS" | sed 's/^/    /'
+    echo "  (a '(deleted)' /proc/<pid>/exe here is a normal rebuild artifact,"
+    echo "  NOT a sign the process is stale -- verify liveness before killing.)"
     if [ "$FORCE_CLEANUP" = "1" ]; then
-        echo "  --force-cleanup set, killing holders..."
         # Skip the lsof header by stripping the first line; column 2 is PID.
-        echo "$HOLDERS" | tail -n +2 | awk '{print $2}' | sort -u \
-            | xargs -r sudo kill -9
-        sleep 1
+        PIDS=$(echo "$HOLDERS" | tail -n +2 | awk '{print $2}' | sort -u)
+        echo "  --force-cleanup set: sending SIGTERM first (graceful shutdown --"
+        echo "  gives the daemon a chance to run its own chrdev/controller"
+        echo "  teardown instead of leaking kernel state)..."
+        echo "$PIDS" | xargs -r sudo kill -TERM
+        for _ in $(seq 1 10); do
+            sleep 1
+            STILL=$(sudo lsof /dev/snvm_control /dev/ssnvme* 2>/dev/null \
+                | tail -n +2 | awk '{print $2}' | sort -u || true)
+            [ -z "$STILL" ] && break
+        done
+        STILL=$(sudo lsof /dev/snvm_control /dev/ssnvme* 2>/dev/null \
+            | tail -n +2 | awk '{print $2}' | sort -u || true)
+        if [ -n "$STILL" ]; then
+            echo "  Still held after 10s graceful wait -- escalating to SIGKILL."
+            echo "  WARNING: this can leak kernel-side controller/chrdev state"
+            echo "  (rmmod 'Module snvme is in use', requiring a reboot) if the"
+            echo "  holder was killed mid-teardown."
+            echo "$STILL" | xargs -r sudo kill -9
+            sleep 1
+        fi
     else
         echo "  Refusing to rmmod with live fd holders; rerun with --force-cleanup"
-        echo "  to SIGKILL them, or stop the holders manually first." >&2
+        echo "  (SIGTERM first, up to a 10s grace period, then SIGKILL only if"
+        echo "  still held), or stop the holders manually first." >&2
         exit 1
     fi
 else
     echo "  No fd holders."
+fi
+
+# ----------------------------------------------------------------
+# Step 2b: the two refcount holders that SNVM_DEVICE_UNBIND /
+# SNVM_CHRDEV_REMOVE never touch (see the IMPORTANT note above) --
+# check these BEFORE blaming "kernel-side leak, reboot only".
+# ----------------------------------------------------------------
+echo "[2b/4] Checking for mounted /dev/snvme*n* and open raw admin chardevs..."
+MOUNTED=$(mount | grep -E '^/dev/snvme[0-9]+n[0-9]+ ' || true)
+RAW_HOLDERS=$(sudo lsof /dev/snvme[0-9]* 2>/dev/null | grep -v ssnvme || true)
+
+if [ -n "$MOUNTED" ]; then
+    echo "  Mounted (this is the #1 cause of a refcount that survives"
+    echo "  a SIGKILL'd daemon -- umount(2) is the only thing that drops it):"
+    echo "$MOUNTED" | sed 's/^/    /'
+    if [ "$FORCE_CLEANUP" = "1" ]; then
+        echo "  --force-cleanup set: unmounting..."
+        echo "$MOUNTED" | awk '{print $3}' | while read -r mp; do
+            sudo umount "$mp" || echo "  umount $mp failed (errno $?)"
+        done
+    else
+        echo "  Refusing to rmmod with a mounted snvme block device; rerun"
+        echo "  with --force-cleanup to umount it, or umount manually first." >&2
+        exit 1
+    fi
+else
+    echo "  No mounted /dev/snvme*n* block devices."
+fi
+
+if [ -n "$RAW_HOLDERS" ]; then
+    echo "  Raw /dev/snvme<N> admin chardev still open by:"
+    echo "$RAW_HOLDERS" | sed 's/^/    /'
+    echo "  SNVM_DEVICE_UNBIND/SNVM_CHRDEV_REMOVE never close this fd for"
+    echo "  you -- stop/kill the holder above manually, then re-run."
+else
+    echo "  No open raw /dev/snvme<N> admin chardevs."
 fi
 
 # ----------------------------------------------------------------
@@ -103,15 +191,22 @@ else
         echo "rmmod failed.  Refcount snapshot:"
         lsmod | grep -E '^(snvme|snvme_core)\s' | sed 's/^/    /' || true
         echo
-        echo "Common causes:"
+        echo "Common causes (roughly in order of likelihood -- see the"
+        echo "IMPORTANT note at the top of this script):"
+        echo "  * Step 2b above found a mounted /dev/snvme*n* or an open"
+        echo "    raw /dev/snvme<N> -- go fix that first, it's the usual"
+        echo "    cause and does NOT require a reboot."
         echo "  * A user-space process still has /dev/ssnvme* open"
         echo "    (lsof check above missed it; race).  Re-run with"
         echo "    --force-cleanup to kill all holders, then retry."
         echo "  * A controller is still bound to snvme.  Check"
         echo "    'lspci -k -d ::0108' for any 'Kernel driver in use:"
         echo "    snvme' lines."
-        echo "  * Kernel-side leak inside the module (rare).  In this"
-        echo "    case rmmod will keep failing until reboot." >&2
+        echo "  * Genuine kernel-side leak inside the module (rare, and"
+        echo "    NOT the same as \"daemon got SIGKILL'd\" -- module"
+        echo "    refcount is auto-paired by the cdev framework on every"
+        echo "    fd close regardless of signal).  In this case rmmod"
+        echo "    will keep failing until reboot." >&2
         exit 1
     fi
 fi

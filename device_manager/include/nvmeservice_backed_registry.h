@@ -43,7 +43,7 @@
 
 #include "device_registry.h"
 #include "local_nvme_device.h"
-#include "../../runtime/include/device.h"
+#include "../../coordinator/include/device.h"
 
 namespace nvmeservice {
 class NvmeServiceClient;
@@ -110,10 +110,10 @@ public:
     /// stands up a heartbeat thread via std::thread which doesn't
     /// survive fork-without-exec (and CUDA fork-hostility applies if
     /// libnvm bring-up has run).
-    bool Open();
+    bool Open() override;
 
     /// Close all sessions + drop ctrl handles.  Idempotent.
-    void Close();
+    void Close() override;
 
     // ---- IDeviceRegistry ----------------------------------------
 

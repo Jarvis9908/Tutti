@@ -13,12 +13,12 @@
  *     (one entry per NVMe controller, RDMA NIC, GDS adapter, ...).
  *   - The registry is the single, runtime-facing source of truth for
  *     "the device fleet" — replacing today's ad-hoc discovery paths
- *     scattered across libgeminifs and NVMeService.
+ *     scattered across the legacy GPU-file path and NVMeService.
  *
  * Layer boundary:
  *   - This is the *service* contract; the runtime depends on this
  *     interface, not on a concrete implementer. The runtime-visible
- *     `Device` value type lives in `runtime/include/device.h`.
+ *     `Device` value type lives in `coordinator/include/device.h`.
  *   - Implementations live in `device_manager/src/` (in-process
  *     registry) or in backend daemons (e.g. NVMeService publishes
  *     its devices through a remote-backed registry implementation).
@@ -37,7 +37,7 @@
 
 namespace tutti {
 
-struct Device;   // runtime/include/device.h
+struct Device;   // coordinator/include/device.h
 
 /**
  * Registry of devices the runtime can submit IO against.
@@ -50,6 +50,21 @@ struct Device;   // runtime/include/device.h
 class IDeviceRegistry {
 public:
     virtual ~IDeviceRegistry() = default;
+
+    /// Bring the registry online: discover / attach / connect every
+    /// device described by the implementation's construction config.
+    /// MUST be called AFTER any fork() the application does (libnvm
+    /// pulls in CUDA, which is fork-hostile).  Returns false on
+    /// failure; partial state is rolled back internally before
+    /// returning.  Implementations do bring-up here, never in the
+    /// constructor.
+    virtual bool Open() = 0;
+
+    /// Tear the registry down: close controllers / disconnect daemon
+    /// sessions.  Idempotent.  The destructor also runs this, so an
+    /// explicit Close() is optional but lets callers sequence teardown
+    /// deterministically.
+    virtual void Close() = 0;
 
     /// Number of devices currently in the registry.
     virtual std::size_t device_count() const = 0;

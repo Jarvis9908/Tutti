@@ -12,7 +12,7 @@
 #   backends/local/nvme/test/             -- L1: libnvm C API smokes  (this dir)
 #   backends/local/NVMeService/test/      -- L2: NVMeService client/daemon
 #                                                IPC smokes  (planned)
-#   filesystems/.../test/                 -- L3: Controller / libgeminifs
+#   filesystems/.../test/                 -- L3: Controller / libtutti
 #                                                smokes  (planned)
 #
 # Initial L1 binaries:

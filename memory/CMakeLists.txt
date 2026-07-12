@@ -36,30 +36,8 @@ set_target_properties(tutti_memory PROPERTIES
     INSTALL_RPATH "$ORIGIN"
 )
 
-# ---------------------------------------------------------------------------
-# Smoke test
-# ---------------------------------------------------------------------------
-
-add_executable(memory_smoke
-    test/memory_smoke.cu
-)
-
-target_link_libraries(memory_smoke
-    PRIVATE
-        tutti_memory
-        tutti_device_manager
-        libnvm
-        CUDA::cudart
-)
-
-set_target_properties(memory_smoke PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    BUILD_RPATH   "$ORIGIN/../lib"
-    INSTALL_RPATH "$ORIGIN/../lib"
-)
+# Smoke tests live in the top-level examples/ tree (R9.4).
 
 install(TARGETS tutti_memory DESTINATION "lib")
-install(TARGETS memory_smoke DESTINATION "bin")
 install(DIRECTORY include/ DESTINATION "include/tutti/memory"
         FILES_MATCHING PATTERN "*.h" PATTERN "*.cuh")

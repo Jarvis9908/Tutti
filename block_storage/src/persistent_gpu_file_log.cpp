@@ -87,6 +87,7 @@ bool PersistentGpuFileLog::load_or_init(std::string log_path) {
 bool PersistentGpuFileLog::load_locked() {
     entries_.clear();
     name_to_index_.clear();
+    id_to_index_.clear();
     next_file_id_ = 1;
     generation_   = 0;
 
@@ -153,6 +154,7 @@ bool PersistentGpuFileLog::load_locked() {
         e.shard_device_ids.assign(de.shard_device_ids,
                                   de.shard_device_ids + de.num_shards);
         name_to_index_[e.name] = entries_.size();
+        id_to_index_[e.file_id] = entries_.size();
         entries_.push_back(std::move(e));
     }
     ::close(fd);
@@ -175,30 +177,31 @@ bool PersistentGpuFileLog::add(Entry e) {
     if (e.num_shards == 0 || e.num_shards > kGpuFileMaxShards) return false;
     if (e.shard_device_ids.size() != e.num_shards)             return false;
     name_to_index_[e.name] = entries_.size();
+    id_to_index_[e.file_id] = entries_.size();
     entries_.push_back(std::move(e));
     return true;
 }
 
 bool PersistentGpuFileLog::remove(uint32_t file_id) {
-    // Linear scan + swap-and-pop, mirroring PersistentFileLog::remove.
-    for (std::size_t i = 0; i < entries_.size(); ++i) {
-        if (entries_[i].file_id == file_id) {
-            name_to_index_.erase(entries_[i].name);
-            const std::size_t last = entries_.size() - 1;
-            if (i != last) {
-                entries_[i] = std::move(entries_[last]);
-                name_to_index_[entries_[i].name] = i;
-            }
-            entries_.pop_back();
-            return true;
-        }
+    auto it = id_to_index_.find(file_id);
+    if (it == id_to_index_.end()) return false;
+    const std::size_t idx = it->second;
+    name_to_index_.erase(entries_[idx].name);
+    id_to_index_.erase(it);
+    const std::size_t last = entries_.size() - 1;
+    if (idx != last) {
+        entries_[idx] = std::move(entries_[last]);
+        name_to_index_[entries_[idx].name] = idx;
+        id_to_index_[entries_[idx].file_id] = idx;
     }
-    return false;
+    entries_.pop_back();
+    return true;
 }
 
 void PersistentGpuFileLog::overwrite_from(const PersistentGpuFileLog& other) {
     entries_       = other.entries_;
     name_to_index_ = other.name_to_index_;
+    id_to_index_   = other.id_to_index_;
     next_file_id_  = other.next_file_id_;
     generation_    = other.generation_;
     // log_path_ stays ours -- this is "I have stale data, accept peer's".

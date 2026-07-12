@@ -61,12 +61,14 @@
 #include <cstddef>
 #include <vector>
 
+#include <cuda_runtime.h>   // cudaStream_t (opaque handle in the SPI)
+
 #include "memory_kind.h"
 #include "memory_region.h"
 
 namespace tutti {
 
-struct Device;   // runtime/include/device.h
+struct Device;   // coordinator/include/device.h
 
 // ---------------------------------------------------------------------------
 // Cluster-wide descriptor format.
@@ -350,6 +352,23 @@ public:
     /// slice once.
     virtual std::vector<IoSliceView>
         list_io_slices(MemoryRegion* region) const = 0;
+
+    /// C-1/C-2: Ensure every PRP-list page backing the given registered
+    /// regions is GPU-resident (promoted into the DMA-mapped L1 tier)
+    /// and each owning descriptor's prp2 is patched to its current L1
+    /// IOVA, all ordered on `stream`.  The io_engine MUST call this for
+    /// a batch's input regions right before launching the NVMe kernel
+    /// on the SAME stream, so the controller fetches valid PRP lists.
+    ///
+    /// Regions whose PRP pages are not cache-managed (no PRP list, or
+    /// the owned always-resident fallback) are skipped.  Returns false
+    /// if the batch's combined PRP working set exceeds the L1 capacity
+    /// or a referenced page was never admitted (register_tensor must
+    /// have run first).  Default no-op for implementations without a
+    /// PRP-page cache.
+    virtual bool ensure_prp_pages_resident(
+        const std::vector<MemoryRegion*>& /*regions*/,
+        cudaStream_t /*stream*/) { return true; }
 
     /// Walk `region`'s DMA mapping for `device` and emit address
     /// descriptors covering byte_range [byte_offset, byte_offset + byte_length).

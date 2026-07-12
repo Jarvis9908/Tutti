@@ -4,8 +4,8 @@
 /**
  * persistent_file_log.h -- per-Device on-disk directory of NvmeFiles.
  *
- * Layer: nvme_storage internal.  Replaces legacy FileManager from
- * filesystems/ext4/libgeminifs/nvme_file.cpp.
+ * Layer: nvme_storage internal.  Replaces the legacy FileManager
+ * from the pre-refactor monolithic GPU-file path.
  *
  * Role:
  *   - For one Device, persists the (name -> NvmeFile metadata)
@@ -103,6 +103,7 @@ private:
     std::string                          log_path_;
     std::vector<Entry>                   entries_;
     std::unordered_map<std::string, std::size_t> name_to_index_;
+    std::unordered_map<uint64_t, std::size_t>    id_to_index_;  // O(1) remove
     uint64_t                             next_file_id_ = 1;
 };
 

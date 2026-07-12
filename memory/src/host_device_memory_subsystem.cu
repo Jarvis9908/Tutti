@@ -15,9 +15,10 @@
 
 #include "host_device_memory_subsystem.h"
 #include "cuda_helpers.cuh"
+#include "prp_list_pool.h"
 
 #include "../../device_manager/include/local_nvme_device.h"
-#include "../../runtime/include/device.h"
+#include "../../coordinator/include/device.h"
 
 #include <cuda_runtime.h>
 #include <nvm_dma.h>
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <unordered_set>
 #include <utility>
 #include <cstdio>
 
@@ -94,10 +96,21 @@ HostDeviceMemorySubsystem::~HostDeviceMemorySubsystem() {
             }
         }
         if (slot.owns_device_alloc && slot.region->device_ptr != nullptr) {
-            cudaFree(slot.region->device_ptr);
+            // Use raw_device_ptr (original cudaMalloc return) when
+            // allocate_device over-allocated for alignment; otherwise
+            // device_ptr IS the cudaMalloc return.
+            cudaFree(slot.raw_device_ptr != nullptr
+                         ? slot.raw_device_ptr
+                         : slot.region->device_ptr);
         }
         regions_.erase(it);
     }
+
+    // C-1: Shut down the PRP-page cache (releases its L1 GPU pool +
+    // DMA map, L2 host-pinned backing store, and scatter-patch
+    // staging).  All individual entries were already erased by
+    // free_io_slice_table_locked above.
+    prp_cache_.shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +192,67 @@ void HostDeviceMemorySubsystem::bind_devices(
     bound_devices_     = devices;
     cluster_page_size_ = page_size;
     cluster_min_mdts_  = min_mdts;
+
+    // C-1: Initialize the two-tier PRP-page cache (L1 GPU-DMA + L2
+    // host-pinned backing store).  Budgets come from configure_prp_pool()
+    // (called by Coordinator before bind_devices) or fall back to
+    // defaults.  slot_bytes == page_size: one PRP page per slot.
+    {
+        PrpPageCache::Config pcfg;
+        pcfg.l1_budget_bytes = (prp_l1_budget_ != 0)
+            ? prp_l1_budget_ : 64ull * 1024 * 1024;
+        pcfg.l2_budget_bytes = (prp_l2_budget_ != 0)
+            ? prp_l2_budget_ : 1ull * 1024 * 1024 * 1024;
+        pcfg.slot_bytes      = (uint32_t)page_size;
+        nvm_ctrl_t* ctrl = ctrl_for(devices.front());
+        // L1 + patch staging live on the current CUDA device (the one
+        // the Coordinator primed at bring-up; tensors register here too).
+        int cuda_dev = 0;
+        cudaGetDevice(&cuda_dev);
+        prp_cuda_device_ = cuda_dev;
+        if (ctrl != nullptr) {
+            // Non-fatal: if the cache fails to init, every needs_prp_list
+            // tensor falls back to an owned always-resident buffer.
+            (void)prp_cache_.init(pcfg, ctrl, cuda_dev);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ensure_prp_pages_resident (C-1/C-2) -- promote every batch region's
+// cache-managed PRP pages into L1 + patch their prp2, ordered on `stream`.
+// Called by the io_engine immediately before the NVMe kernel launch.
+// ---------------------------------------------------------------------------
+
+bool HostDeviceMemorySubsystem::ensure_prp_pages_resident(
+    const std::vector<MemoryRegion*>& regions, cudaStream_t stream)
+{
+    if (!prp_cache_.ready()) return true;   // nothing cache-managed
+
+    std::lock_guard<std::mutex> lock(mtx_);
+
+    // Gather the prp2 device addresses of every cache-managed PRP page
+    // across all regions in the batch, then make them resident + patch
+    // in ONE ensure_resident_batch call (one scatter kernel for the
+    // whole batch).  De-dup regions (same region may appear twice --
+    // e.g. K and V slices of one tensor share nothing here, but a
+    // caller could repeat a region).
+    std::vector<uint64_t*> keys;
+    std::unordered_set<uint64_t> seen_regions;
+    for (MemoryRegion* r : regions) {
+        if (r == nullptr) continue;
+        if (!seen_regions.insert(r->region_id).second) continue;
+        auto it = regions_.find(r->region_id);
+        if (it == regions_.end()) continue;
+        const IoSliceTable& tab = it->second.io_slice_table;
+        if (!tab.prp_cached || tab.d_all_descriptors == nullptr) continue;
+        for (std::size_t io = 0; io < tab.total_descriptors; ++io)
+            keys.push_back(&(tab.d_all_descriptors[io].prp2));
+    }
+    if (keys.empty()) return true;   // no cache-managed pages in this batch
+
+    return prp_cache_.ensure_resident_batch(keys.data(),
+                                            (uint32_t)keys.size(), stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +262,8 @@ void HostDeviceMemorySubsystem::bind_devices(
 MemoryRegion* HostDeviceMemorySubsystem::register_into_table(
     std::unique_ptr<MemoryRegion> r,
     bool owns_host_alloc,
-    bool owns_device_alloc)
+    bool owns_device_alloc,
+    void* raw_device_ptr)
 {
     std::lock_guard<std::mutex> lock(mtx_);
 
@@ -197,6 +272,7 @@ MemoryRegion* HostDeviceMemorySubsystem::register_into_table(
     slot.region            = std::move(r);
     slot.owns_host_alloc   = owns_host_alloc;
     slot.owns_device_alloc = owns_device_alloc;
+    slot.raw_device_ptr    = raw_device_ptr;
 
     auto [it, ok] = regions_.emplace(id, std::move(slot));
     if (!ok) {
@@ -281,17 +357,27 @@ MemoryRegion* HostDeviceMemorySubsystem::allocate_device(
     if (kind == MemoryKind::DEVICE) {
         if (device_id < 0) return nullptr;
         if (cudaSetDevice(device_id) != cudaSuccess) return nullptr;
-        void* ptr = nullptr;
-        if (cudaMalloc(&ptr, size) != cudaSuccess) return nullptr;
+
+        // cudaMalloc only guarantees 256-byte alignment, but
+        // register_tensor's build_io_slice_table requires 4096-byte
+        // (page) alignment, and snvme.ko's nvm_dma_map_data_device
+        // prefers 64 KiB vaddr alignment.  Over-allocate by 64 KiB
+        // and align the exposed device_ptr (same pattern as
+        // buffer.h::getDeviceMemory and IoSliceTable::prp_list_devptr).
+        constexpr std::size_t kAlign = 65536;  // 64 KiB
+        void* raw = nullptr;
+        if (cudaMalloc(&raw, size + kAlign) != cudaSuccess) return nullptr;
+        uintptr_t aligned_addr = ((uintptr_t)raw + kAlign - 1) & ~(uintptr_t)(kAlign - 1);
+        void* aligned_ptr = (void*)aligned_addr;
 
         uint64_t id;
         { std::lock_guard<std::mutex> lock(mtx_); id = next_region_id_++; }
         auto r = make_region(id);
         r->kind        = MemoryKind::DEVICE;
         r->cuda_device = device_id;
-        r->device_ptr  = ptr;
+        r->device_ptr  = aligned_ptr;
         r->size        = size;
-        return register_into_table(std::move(r), false, true);
+        return register_into_table(std::move(r), false, true, raw);
     }
 
     if (kind == MemoryKind::MANAGED) {
@@ -459,7 +545,10 @@ bool HostDeviceMemorySubsystem::ensure_mapping_locked(Slot& slot)
 MemoryRegion* HostDeviceMemorySubsystem::register_tensor(
     const TensorRegistrationSpec& spec)
 {
-    if (spec.ptr == nullptr || spec.size == 0) return nullptr;
+    if (spec.ptr == nullptr || spec.size == 0) {
+        last_register_error_ = "invalid argument (ptr=null or size=0)";
+        return nullptr;
+    }
 
     // Step 1: find or create a region for spec.ptr.
     MemoryRegion* region = nullptr;
@@ -506,6 +595,9 @@ MemoryRegion* HostDeviceMemorySubsystem::register_tensor(
             return nullptr;
         }
         if (!ensure_mapping_locked(*slot)) {
+            last_register_error_ =
+                "BAR1 P2P window exhausted (nvm_dma_map_data_device failed) "
+                "-- lower batch size or tensor size, or increase BAR1";
             std::fprintf(stderr,
                 "[memory] register_tensor: mapping failed\n");
             return nullptr;
@@ -528,6 +620,9 @@ MemoryRegion* HostDeviceMemorySubsystem::register_tensor(
         // re-registering with a different granularity.
         if (spec.granularity > 0) {
             if (!build_io_slice_table_locked(*slot, spec)) {
+                last_register_error_ =
+                    "build_io_slice_table failed (cudaMalloc for descriptors "
+                    "or PRP-list buffer failed, or DMA validation failed)";
                 std::fprintf(stderr,
                     "[memory] register_tensor: build_io_slice_table failed\n");
                 return nullptr;
@@ -535,6 +630,7 @@ MemoryRegion* HostDeviceMemorySubsystem::register_tensor(
         }
     }
 
+    last_register_error_.clear();
     return region;
 }
 
@@ -724,15 +820,13 @@ bool validate_prp_list_dma(const nvm_dma_t* prp_dma,
 void fill_address_descriptors(const IoSliceBuildPlan&         plan,
                               const nvm_dma_t*                data_dma,
                               const nvm_dma_t*                prp_dma,
+                              uint32_t                        prp_ioaddr_base,
                               std::vector<AddressDescriptor>& h_entries,
-                              std::vector<std::uint64_t>&     h_prp_pages) {
+                              std::uint64_t*                  h_prp_pages) {
     const std::size_t entries_per_page =
         plan.page_size / sizeof(std::uint64_t);
     h_entries.assign(plan.total_ios, AddressDescriptor{});
-    if (plan.needs_prp_list) {
-        h_prp_pages.assign(
-            (std::size_t)plan.total_ios * entries_per_page, 0ull);
-    }
+    // Caller must zero h_prp_pages when plan.needs_prp_list.
 
     for (std::uint32_t g = 0; g < plan.num_slices; ++g) {
         for (std::uint32_t i = 0; i < plan.ios_per_slice; ++i) {
@@ -769,8 +863,18 @@ void fill_address_descriptors(const IoSliceBuildPlan&         plan,
                 // into the scratch page at element offset
                 // io_idx * entries_per_page.  Remaining entries stay
                 // 0 (the controller stops at pages_in_io - 1).
-                d.prp2 = prp_dma->ioaddrs[io_idx];
-                std::uint64_t* page = h_prp_pages.data()
+                //
+                // prp_dma == nullptr signals the PRP-page CACHE path:
+                // this page's IOVA isn't known at build time (it gets an
+                // L1 slot only when an IO batch needs it), so prp2 is
+                // left 0 here and rewritten by
+                // PrpPageCache::ensure_resident_batch before first use.
+                // The page CONTENT below is still built regardless -- it
+                // is what gets admitted into the cache's L2 backing store.
+                d.prp2 = (prp_dma != nullptr)
+                             ? prp_dma->ioaddrs[prp_ioaddr_base + io_idx]
+                             : 0;
+                std::uint64_t* page = h_prp_pages
                                       + (std::size_t)io_idx * entries_per_page;
                 for (std::uint32_t p = 1; p < pages_in_io; ++p) {
                     page[p - 1] = data_dma->ioaddrs[start_page + p];
@@ -815,10 +919,10 @@ bool upload_descriptors_to_gpu(
 // be called only when plan.needs_prp_list.
 bool upload_prp_list_pages(
     void*                                 prp_list_devptr,
-    const std::vector<std::uint64_t>&     h_prp_pages,
+    const std::uint64_t*                  h_prp_pages,
     const IoSliceBuildPlan&               plan) {
     cudaError_t cerr = cudaMemcpy(prp_list_devptr,
-                                  h_prp_pages.data(),
+                                  h_prp_pages,
                                   (std::size_t)plan.total_ios * plan.page_size,
                                   cudaMemcpyHostToDevice);
     if (cerr != cudaSuccess) {
@@ -856,17 +960,332 @@ void build_slice_views(const MemoryRegion*       region,
     }
 }
 
+// Allocate a snvme.ko-friendly GPU buffer and DMA-map it as a B6
+// fd-scoped DATA buffer on `ctrl`.
+//
+// snvme.ko's NVM_MAP_DEVICE_MEMORY ioctl pins memory in
+// GPU_PAGE_SIZE (64 KiB) chunks.  Two invariants must hold before
+// nvm_dma_map_data_device will return a usable mapping:
+//
+//   (a) the buffer size must be a multiple of GPU_PAGE_SIZE
+//       (otherwise the kernel's n_addrs computation under-counts
+//       and validate_prp_list_dma rejects the resulting handle),
+//   (b) the buffer's GPU vaddr must be 64 KiB-aligned (otherwise
+//       nvfs_nvidia_p2p_get_pages rounds the vaddr DOWN to the
+//       nearest GPU page, so libnvm's ioaddrs[] point BEFORE the
+//       caller's actual buffer; the controller then fetches
+//       garbage as the PRP list and only PRP1 is ever served).
+//
+// cudaMalloc only guarantees ~256-byte alignment for sub-64 KiB
+// allocations, so we over-allocate by GPU_PAGE_SIZE and align
+// manually.  This also subsumes the size round-up.
+//
+// Why hand-rolled rather than libnvm's createDma(ctrl, size,
+// cudaDevice)?  That helper uses the LEGACY nvm_dma_map_device
+// ABI (map_kind = UNSPECIFIED, group_id = 0); we want the B6
+// nvm_dma_map_data_device ABI for fd-scoped DATA buffers.  Same
+// alignment trick, different map ioctl.
+//
+// On success: *out_dma is non-null + GPU_PAGE_SIZE-sized; the
+// caller-usable region starts at *out_aligned (size
+// *out_aligned_bytes); *out_raw points at the underlying
+// cudaMalloc allocation that the caller MUST cudaFree().
+//
+// On failure: returns false; out_* fields are left in a clean
+// "nothing was allocated" state (any partial allocation is
+// rolled back internally before returning).
+bool dma_alloc_device_data(nvm_ctrl_t* ctrl,
+                           std::size_t  user_bytes,
+                           nvm_dma_t**  out_dma,
+                           void**       out_aligned,
+                           void**       out_raw,
+                           std::size_t* out_aligned_bytes)
+{
+    *out_dma           = nullptr;
+    *out_aligned       = nullptr;
+    *out_raw           = nullptr;
+    *out_aligned_bytes = 0;
+
+    if (ctrl == nullptr || user_bytes == 0) {
+        std::fprintf(stderr,
+            "[memory] dma_alloc_device_data: bad input "
+            "(ctrl=%p user_bytes=%zu)\n", (void*)ctrl, user_bytes);
+        return false;
+    }
+
+    constexpr std::size_t kGpuPageSize = 1ULL << 16;
+    const std::size_t aligned_bytes =
+        (user_bytes + kGpuPageSize - 1) & ~(kGpuPageSize - 1);
+    const std::size_t alloc_bytes = aligned_bytes + kGpuPageSize;
+
+    void* raw = nullptr;
+    cudaError_t cerr = cudaMalloc(&raw, alloc_bytes);
+    if (cerr != cudaSuccess) {
+        std::fprintf(stderr,
+            "[memory] dma_alloc_device_data: cudaMalloc(%zu B, "
+            "aligned=%zu user=%zu) failed: %s\n",
+            alloc_bytes, aligned_bytes, user_bytes,
+            cudaGetErrorString(cerr));
+        return false;
+    }
+    const std::uintptr_t raw_addr = reinterpret_cast<std::uintptr_t>(raw);
+    void* aligned = reinterpret_cast<void*>(
+        (raw_addr + kGpuPageSize - 1) & ~(kGpuPageSize - 1));
+
+    nvm_dma_t* dma = nullptr;
+    int rc = nvm_dma_map_data_device(&dma, ctrl, aligned, aligned_bytes);
+    if (rc != 0 || dma == nullptr) {
+        std::fprintf(stderr,
+            "[memory] dma_alloc_device_data: nvm_dma_map_data_device "
+            "rc=%d dma=%p (aligned=%p aligned_bytes=%zu)\n",
+            rc, (void*)dma, aligned, aligned_bytes);
+        cudaFree(raw);
+        return false;
+    }
+
+    *out_dma           = dma;
+    *out_aligned       = aligned;
+    *out_raw           = raw;
+    *out_aligned_bytes = aligned_bytes;
+    return true;
+}
+
 } // namespace
+
+// ===========================================================================
+// PrpListPool implementation (C-1) — dumb O(1) two-tier byte-slot
+// allocator (L1 GPU-DMA + L2 host-pinned).  Tiered-cache behaviour
+// (LRU / promote / evict / event-fence / prp2 patch) lives in
+// PrpPageCache (prp_page_cache.h), which owns one of these.
+// ===========================================================================
+
+PrpListPool::~PrpListPool() {
+    shutdown();
+}
+
+bool PrpListPool::init(const Config& cfg, nvm_ctrl_t* ctrl) {
+    if (l1_dma_ != nullptr) return true;  // already initialized
+    if (ctrl == nullptr || cfg.slot_bytes == 0) {
+        std::fprintf(stderr,
+            "[prp_pool] init: bad input (ctrl=%p slot=%u)\n",
+            (void*)ctrl, cfg.slot_bytes);
+        return false;
+    }
+
+    cfg_  = cfg;
+    ctrl_ = ctrl;
+
+    // ---- L1: GPU-resident, DMA-mapped ----
+    l1_capacity_ = (uint32_t)(cfg.l1_budget_bytes / cfg.slot_bytes);
+    if (l1_capacity_ == 0) l1_capacity_ = 1;
+
+    constexpr std::size_t kGpuPageSize = 1ULL << 16;
+    const std::size_t l1_total = (std::size_t)l1_capacity_ * cfg.slot_bytes;
+    const std::size_t l1_aligned = (l1_total + kGpuPageSize - 1)
+                                   & ~(kGpuPageSize - 1);
+    const std::size_t l1_alloc = l1_aligned + kGpuPageSize;
+
+    cudaError_t cerr = cudaMalloc(&l1_raw_, l1_alloc);
+    if (cerr != cudaSuccess) {
+        std::fprintf(stderr,
+            "[prp_pool] init L1: cudaMalloc(%zu B) failed: %s\n",
+            l1_alloc, cudaGetErrorString(cerr));
+        l1_capacity_ = 0;
+        return false;
+    }
+    const std::uintptr_t raw_addr = reinterpret_cast<std::uintptr_t>(l1_raw_);
+    l1_devptr_ = reinterpret_cast<void*>(
+        (raw_addr + kGpuPageSize - 1) & ~(kGpuPageSize - 1));
+
+    int rc = nvm_dma_map_data_device(&l1_dma_, ctrl, l1_devptr_, l1_aligned);
+    if (rc != 0 || l1_dma_ == nullptr) {
+        std::fprintf(stderr,
+            "[prp_pool] init L1: nvm_dma_map_data_device rc=%d\n", rc);
+        cudaFree(l1_raw_);
+        l1_raw_ = nullptr; l1_devptr_ = nullptr; l1_capacity_ = 0;
+        return false;
+    }
+    l1_next_bump_ = 0;
+    l1_free_list_.clear();
+
+    // ---- L2: host-pinned backing store ----
+    l2_capacity_ = (uint32_t)(cfg.l2_budget_bytes / cfg.slot_bytes);
+    if (l2_capacity_ == 0) l2_capacity_ = 1;
+
+    const std::size_t l2_total = (std::size_t)l2_capacity_ * cfg.slot_bytes;
+    cerr = cudaMallocHost(&l2_hostptr_, l2_total);
+    if (cerr != cudaSuccess) {
+        std::fprintf(stderr,
+            "[prp_pool] init L2: cudaMallocHost(%zu B) failed: %s\n",
+            l2_total, cudaGetErrorString(cerr));
+        nvm_dma_unmap(l1_dma_);  l1_dma_ = nullptr;
+        cudaFree(l1_raw_);       l1_raw_ = nullptr; l1_devptr_ = nullptr;
+        l1_capacity_ = 0;
+        return false;
+    }
+    l2_next_bump_ = 0;
+    l2_free_list_.clear();
+
+    std::fprintf(stderr,
+        "[prp_pool] init: L1=%u slots x %u B = %zu KiB (GPU, DMA-mapped, "
+        "n_ioaddrs=%zu), L2=%u slots x %u B = %zu KiB (host-pinned)\n",
+        l1_capacity_, cfg.slot_bytes, l1_total / 1024,
+        (std::size_t)l1_dma_->n_ioaddrs,
+        l2_capacity_, cfg.slot_bytes, l2_total / 1024);
+    return true;
+}
+
+void PrpListPool::shutdown() {
+    if (l1_dma_ != nullptr) {
+        nvm_dma_unmap(l1_dma_);
+        l1_dma_ = nullptr;
+    }
+    if (l1_raw_ != nullptr) {
+        cudaFree(l1_raw_);
+        l1_raw_ = nullptr;
+    }
+    l1_devptr_ = nullptr;
+    l1_capacity_ = 0;
+    l1_next_bump_ = 0;
+    l1_free_list_.clear();
+
+    if (l2_hostptr_ != nullptr) {
+        cudaFreeHost(l2_hostptr_);
+        l2_hostptr_ = nullptr;
+    }
+    l2_capacity_ = 0;
+    l2_next_bump_ = 0;
+    l2_free_list_.clear();
+
+    cfg_ = {};
+    ctrl_ = nullptr;
+}
+
+void* PrpListPool::acquire_l1(uint32_t* out_slot_index,
+                               uint32_t* out_ioaddr_base) {
+    *out_slot_index = 0;
+    *out_ioaddr_base = 0;
+    if (l1_dma_ == nullptr) return nullptr;
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    uint32_t idx;
+    if (!l1_free_list_.empty()) {
+        idx = l1_free_list_.front();
+        l1_free_list_.pop_front();
+    } else if (l1_next_bump_ < l1_capacity_) {
+        idx = l1_next_bump_++;
+    } else {
+        ++stats_.l1_exhausted;
+        return nullptr;
+    }
+    ++stats_.l1_acquires;
+    *out_slot_index = idx;
+    const uint32_t ioaddrs_per_slot =
+        cfg_.slot_bytes / (uint32_t)l1_dma_->page_size;
+    *out_ioaddr_base = idx * ioaddrs_per_slot;
+    return static_cast<uint8_t*>(l1_devptr_)
+           + (std::size_t)idx * cfg_.slot_bytes;
+}
+
+void* PrpListPool::acquire_l2(uint32_t* out_slot_index) {
+    *out_slot_index = 0;
+    if (l2_hostptr_ == nullptr) return nullptr;
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    uint32_t idx;
+    if (!l2_free_list_.empty()) {
+        idx = l2_free_list_.front();
+        l2_free_list_.pop_front();
+    } else if (l2_next_bump_ < l2_capacity_) {
+        idx = l2_next_bump_++;
+    } else {
+        ++stats_.l2_exhausted;
+        return nullptr;
+    }
+    ++stats_.l2_acquires;
+    *out_slot_index = idx;
+    return static_cast<uint8_t*>(l2_hostptr_)
+           + (std::size_t)idx * cfg_.slot_bytes;
+}
+
+void PrpListPool::release_l1(uint32_t slot_index) {
+    if (l1_dma_ == nullptr || slot_index >= l1_capacity_) return;
+    std::lock_guard<std::mutex> lock(mtx_);
+    l1_free_list_.push_back(slot_index);
+    ++stats_.l1_releases;
+}
+
+void PrpListPool::release_l2(uint32_t slot_index) {
+    if (l2_hostptr_ == nullptr || slot_index >= l2_capacity_) return;
+    std::lock_guard<std::mutex> lock(mtx_);
+    l2_free_list_.push_back(slot_index);
+    ++stats_.l2_releases;
+}
+
+// ---------------------------------------------------------------------------
+// prp_launch_patch_prp2 -- scatter kernel + host wrapper (used by
+// PrpPageCache::ensure_resident_batch to rewrite every promoted page's
+// owning descriptor prp2 to its new L1 IOVA in ONE launch).
+// ---------------------------------------------------------------------------
+
+namespace {
+__global__ void patch_prp2_kernel(uint64_t* const* targets,
+                                  const uint64_t*  values,
+                                  uint32_t         count) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) *targets[i] = values[i];
+}
+} // namespace
+
+void prp_launch_patch_prp2(uint64_t* const* d_targets,
+                           const uint64_t*  d_values,
+                           uint32_t         count,
+                           cudaStream_t     stream) {
+    if (count == 0) return;
+    const uint32_t tpb = 256;
+    const uint32_t blocks = (count + tpb - 1) / tpb;
+    patch_prp2_kernel<<<blocks, tpb, 0, stream>>>(d_targets, d_values, count);
+    cudaError_t cerr = cudaGetLastError();
+    if (cerr != cudaSuccess) {
+        std::fprintf(stderr,
+            "[prp_cache] patch_prp2_kernel launch failed (count=%u): %s\n",
+            count, cudaGetErrorString(cerr));
+    }
+}
+
+// ===========================================================================
 
 void HostDeviceMemorySubsystem::free_io_slice_table_locked(IoSliceTable& tab) {
     // Order matters: drop kernel DMA bookkeeping first, then GPU
     // memory allocations.  All idempotent (clear-on-empty).
+
+    // C-1: PRP pages managed by the cache -- release each page's L1
+    // (if resident) + L2 backing slot, keyed by its descriptor's prp2
+    // device address.  Uses stream 0: unregister is a control-plane op
+    // and the caller is expected to have drained IO on this region's
+    // stream(s) first (same contract as the rest of teardown here).
+    if (tab.prp_cached && tab.d_all_descriptors != nullptr &&
+        tab.total_descriptors > 0) {
+        std::vector<uint64_t*> keys(tab.total_descriptors);
+        for (std::size_t io = 0; io < tab.total_descriptors; ++io)
+            keys[io] = &(tab.d_all_descriptors[io].prp2);
+        prp_cache_.erase(keys.data(), (uint32_t)tab.total_descriptors,
+                         /*stream=*/0);
+        tab.prp_cached = false;
+    }
+
+    // Owned-fallback PRP buffer (independent allocation) -- unmap + free.
     if (tab.prp_list_dma != nullptr) {
         nvm_dma_unmap(tab.prp_list_dma);
         tab.prp_list_dma = nullptr;
     }
-    if (tab.prp_list_devptr != nullptr) {
-        cudaFree(tab.prp_list_devptr);
+    if (tab.prp_list_raw != nullptr) {
+        // cudaFree the raw allocation; tab.prp_list_devptr is just
+        // an aligned offset into prp_list_raw and must NOT be freed
+        // separately (cudaFree only accepts allocator-returned
+        // pointers).
+        cudaFree(tab.prp_list_raw);
+        tab.prp_list_raw    = nullptr;
         tab.prp_list_devptr = nullptr;
     }
     tab.prp_list_bytes = 0;
@@ -948,62 +1367,42 @@ bool HostDeviceMemorySubsystem::build_io_slice_table_locked(
         return true;
     }
 
-    // ---- 5. Allocate + DMA-map the PRP-list buffer (only when
-    //          plan.needs_prp_list).  Owned by `tab` and freed by
-    //          free_io_slice_table_locked().  Sized to
-    //          plan.total_ios * page_size (one 4 KiB PRP page per
-    //          IO).  ONE nvm_dma_map_data_device call here -- same
-    //          deployment contract as Slot::data_dma above
-    //          (snvme.ko handles the multi-ctrl bookkeeping
-    //          internally on the single ioctl). ------------------
-    nvm_dma_t* prp_dma = nullptr;
-    if (plan.needs_prp_list) {
-        tab.prp_list_bytes = (std::size_t)plan.total_ios * page_size;
-        cudaError_t cerr =
-            cudaMalloc(&tab.prp_list_devptr, tab.prp_list_bytes);
-        if (cerr != cudaSuccess) {
-            std::fprintf(stderr,
-                "[memory] build_io_slice_table: cudaMalloc(prp_list, "
-                "%zu B) failed: %s\n",
-                tab.prp_list_bytes, cudaGetErrorString(cerr));
-            tab.prp_list_devptr = nullptr;
-            tab.prp_list_bytes  = 0;
-            return false;
-        }
+    // ---- 5. Decide the PRP-page backing strategy (only matters when
+    //          plan.needs_prp_list).
+    //
+    //          C-1: preferred path is the two-tier PrpPageCache -- each
+    //          of the tensor's total_ios PRP pages is admitted into the
+    //          cache's host-pinned L2 backing store here (built ONCE),
+    //          and paged into a GPU-DMA L1 slot on demand at IO time by
+    //          ensure_prp_pages_resident().  This is what lets the count
+    //          of registered PRP pages exceed GPU memory (only the hot
+    //          working set is L1-resident).
+    //
+    //          Owned fallback: if the cache isn't ready, or its L2
+    //          backing store is exhausted mid-admit, the tensor falls
+    //          back to an independent, always-GPU-resident PRP buffer
+    //          (exact pre-C-1 behaviour).  In that case prp2 must carry
+    //          the real owned IOVA, so we re-fill + re-upload the
+    //          descriptor blob below. --------------------------------
+    const std::size_t entries_per_page = page_size / sizeof(std::uint64_t);
+    const bool use_cache = plan.needs_prp_list && prp_cache_.ready();
 
-        nvm_ctrl_t* ctrl = ctrl_for(ref_dev);
-        if (ctrl == nullptr) {
-            std::fprintf(stderr,
-                "[memory] build_io_slice_table: ref device %d has no "
-                "libnvm ctrl (PRP-list mapping)\n", ref_dev->device_id);
-            free_io_slice_table_locked(tab);
-            return false;
-        }
-        int rc = nvm_dma_map_data_device(&tab.prp_list_dma, ctrl,
-                                          tab.prp_list_devptr,
-                                          tab.prp_list_bytes);
-        if (rc != 0 || tab.prp_list_dma == nullptr) {
-            std::fprintf(stderr,
-                "[memory] build_io_slice_table: nvm_dma_map_data_device"
-                "(prp_list) rc=%d dma=%p\n",
-                rc, (void*)tab.prp_list_dma);
-            tab.prp_list_dma = nullptr;
-            free_io_slice_table_locked(tab);
-            return false;
-        }
-        prp_dma = tab.prp_list_dma;
-        if (!validate_prp_list_dma(prp_dma, page_size, plan.total_ios)) {
-            free_io_slice_table_locked(tab);
-            return false;
-        }
-    }
-
-    // ---- 6. Build host-side AddressDescriptor[] + PRP-list pages --
+    // ---- 6. Build host-side AddressDescriptor[] + PRP-list page
+    //          content.  On the cache path prp_dma == nullptr so
+    //          fill_address_descriptors leaves prp2 == 0 (patched at IO
+    //          time); the page CONTENT is built either way. -----------
     std::vector<AddressDescriptor> h_entries;
     std::vector<std::uint64_t>     h_prp_pages;
-    fill_address_descriptors(plan, data_dma, prp_dma, h_entries, h_prp_pages);
+    if (plan.needs_prp_list)
+        h_prp_pages.assign((std::size_t)plan.total_ios * entries_per_page, 0ull);
 
-    // ---- 7. Upload the descriptor blob to GPU ---------------------
+    fill_address_descriptors(plan, data_dma, /*prp_dma=*/nullptr,
+                             /*prp_ioaddr_base=*/0,
+                             h_entries, h_prp_pages.data());
+
+    // ---- 7. Upload the descriptor blob to GPU (gives us the stable
+    //          device addresses &d_all_descriptors[io_idx].prp2 that key
+    //          the cache). --------------------------------------------
     if (!upload_descriptors_to_gpu(h_entries,
                                     tab.d_all_descriptors,
                                     tab.total_descriptors)) {
@@ -1011,14 +1410,81 @@ bool HostDeviceMemorySubsystem::build_io_slice_table_locked(
         return false;
     }
 
-    // ---- 8. Upload PRP-list pages (if any) into our own GPU
-    //          scratch buffer.  ONE copy serves every controller
-    //          across bound devices (PCI bus addresses are
-    //          controller-agnostic). -----------------------------
+    // ---- 8. PRP-page residency backing --------------------------------
     if (plan.needs_prp_list) {
-        if (!upload_prp_list_pages(tab.prp_list_devptr, h_prp_pages, plan)) {
-            free_io_slice_table_locked(tab);
-            return false;
+        bool cached_ok = false;
+        if (use_cache) {
+            // Admit each page into the cache's L2 backing store, keyed by
+            // its owning descriptor's prp2 device address.
+            uint32_t admitted = 0;
+            cached_ok = true;
+            for (std::uint32_t io = 0; io < plan.total_ios; ++io) {
+                uint64_t* key = &(tab.d_all_descriptors[io].prp2);
+                if (!prp_cache_.admit(key,
+                        h_prp_pages.data() + (std::size_t)io * entries_per_page)) {
+                    cached_ok = false;
+                    break;
+                }
+                ++admitted;
+            }
+            if (!cached_ok) {
+                // Roll back the partial admit, then fall through to the
+                // owned buffer.
+                std::vector<uint64_t*> keys(admitted);
+                for (std::uint32_t io = 0; io < admitted; ++io)
+                    keys[io] = &(tab.d_all_descriptors[io].prp2);
+                if (admitted > 0)
+                    prp_cache_.erase(keys.data(), admitted, /*stream=*/0);
+                std::fprintf(stderr,
+                    "[memory] build_io_slice_table: PRP-page cache L2 "
+                    "exhausted after %u/%u pages -- falling back to owned "
+                    "buffer for this tensor\n", admitted, plan.total_ios);
+            }
+        }
+
+        if (cached_ok) {
+            tab.prp_cached = true;
+        } else {
+            // Owned fallback: allocate an always-resident PRP buffer,
+            // re-fill descriptors so prp2 carries the real owned IOVA,
+            // re-upload the blob, then upload the pages.
+            nvm_ctrl_t* ctrl = ctrl_for(ref_dev);
+            const std::size_t user_bytes =
+                (std::size_t)plan.total_ios * page_size;
+            if (ctrl == nullptr ||
+                !dma_alloc_device_data(ctrl, user_bytes,
+                                       &tab.prp_list_dma,
+                                       &tab.prp_list_devptr,
+                                       &tab.prp_list_raw,
+                                       &tab.prp_list_bytes) ||
+                !validate_prp_list_dma(tab.prp_list_dma, page_size,
+                                        plan.total_ios)) {
+                std::fprintf(stderr,
+                    "[memory] build_io_slice_table: owned PRP fallback "
+                    "allocation failed\n");
+                free_io_slice_table_locked(tab);
+                return false;
+            }
+            tab.prp_cached = false;
+
+            // Re-fill with the real prp_dma so prp2 is the owned IOVA.
+            std::fill(h_prp_pages.begin(), h_prp_pages.end(), 0ull);
+            fill_address_descriptors(plan, data_dma, tab.prp_list_dma,
+                                     /*prp_ioaddr_base=*/0,
+                                     h_entries, h_prp_pages.data());
+            cudaError_t cerr = cudaMemcpy(
+                tab.d_all_descriptors, h_entries.data(),
+                h_entries.size() * sizeof(AddressDescriptor),
+                cudaMemcpyHostToDevice);
+            if (cerr != cudaSuccess ||
+                !upload_prp_list_pages(tab.prp_list_devptr,
+                                       h_prp_pages.data(), plan)) {
+                std::fprintf(stderr,
+                    "[memory] build_io_slice_table: owned PRP fallback "
+                    "upload failed\n");
+                free_io_slice_table_locked(tab);
+                return false;
+            }
         }
     }
 

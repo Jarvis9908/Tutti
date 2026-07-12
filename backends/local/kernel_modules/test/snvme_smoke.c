@@ -2,7 +2,7 @@
  * snvme_smoke.c -- Standalone end-to-end sanity test for the SNVMe kernel module.
  *
  * This program is intentionally self-contained:
- *   - no CUDA, no libnvm, no Geminifs filesystem dependencies,
+ *   - no CUDA, no libnvm, no Tutti filesystem dependencies,
  *   - it links against nothing but libc,
  *   - it only includes the SNVMe UAPI header
  *     (backends/local/nvme/libnvm/include/ioctl.h).
@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
     /* ------------------------------------------------------------------ */
     /* [6] NVM_SET_IOQ_NUM                                                */
     /*                                                                    */
-    /* Geminifs ABI: NVM_SET_IOQ_NUM now takes a struct nvm_ioctl_setup   */
+    /* Tutti ABI: NVM_SET_IOQ_NUM now takes a struct nvm_ioctl_setup   */
     /* (NOT the legacy nvm_ioctl_map packing).  Fields used here:         */
     /*                                                                    */
     /*   .ioq_num = 2                                                     */

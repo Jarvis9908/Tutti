@@ -2,26 +2,33 @@
 #define __TUTTI_NVME_STORAGE_NVME_FILE_H__
 
 /**
- * nvme_file.h -- the runtime-side NvmeFile handle.
+ * nvme_file.h -- the runtime-side NvmeFile handle (metadata-only).
  *
  * Layer: nvme_storage.  This is what callers (block_storage, smokes)
- * hold after a successful create_file / open_file.  It is *not* the
- * on-disk header (see nvme_file_header.h) -- that one lives at byte
- * 0..4095 of the file; this struct is the host-side runtime view.
+ * hold after a successful create_file / open_file.
+ *
+ * R11.5: NvmeFile is now metadata-only -- it does NOT hold a host fd.
+ * The file's physical LBA layout (extents) is read once at create
+ * time via FIEMAP and cached here permanently (extents don't change
+ * on ext4 after fallocate).  Host-side IO (read_blocking / write_
+ * blocking / sync) opens a temporary fd via `refs_path` on demand
+ * and closes it immediately after -- see host_fs_backed_nvme_storage.cpp.
+ *
+ * The on-disk file no longer has a 4 KiB header prefix (R11.5 removed
+ * pwrite(header)); user data starts at byte 0.  All metadata lives in
+ * PersistentFileLog, not in-band.
+ *
+ * A hardlink under `.tutti/.refs/<name>.bin` acts as an inode
+ * refcount: external `rm` of the original path won't free the inode
+ * (nlink stays 1 via the ref), so LBA extents stay valid for any
+ * GPU kernel still reading through them.  Only `delete_file` unlinks
+ * both the original path and the ref.
  *
  * Lifetime:
  *   - Created and owned by INvmeStorage.
- *   - Destroyed via INvmeStorage::close_file() or delete_file().
+ *   - Destroyed via INvmeStorage::delete_file().
+ *   - close_file() is now a no-op (no fd to close, no cache to erase).
  *   - Holders MUST NOT delete; the storage handles that.
- *
- * Multi-NVMe:
- *   - `device` points at the controller this file lives on.
- *     Multi-NVMe deployments have many NvmeFile instances per
- *     storage; each is bound to exactly one Device.
- *
- * What's NOT in here:
- *   - GPU-side mirror handle (NvmeFileDeviceHandle).  R5b adds it.
- *   - Per-file lease.  Block storage layer owns leasing.
  */
 
 #include <cstdint>
@@ -40,15 +47,13 @@ using NvmeFileId = uint64_t;
 struct NvmeFile {
     NvmeFileId            id;
     std::string           name;
-    uint64_t              size_bytes;        // logical size (excludes header)
+    uint64_t              size_bytes;        // logical size (no header prefix)
     const Device*         device;
     std::vector<LbaExtent> extents;          // physical LBAs of the host file
-                                             //   incl. the 4 KiB header at extent[0]
-    // ---- host-side bookkeeping ----
-    int                   host_fd = -1;      // open fd for pread/pwrite/fsync;
-                                             //   < 0 if file is closed.
-    std::string           host_path;         // e.g. "/mnt/nvme1/.tutti/foo.bin"
-    uint64_t              data_offset = 0;   // bytes; equals sizeof(NvmeFileHeader)
+    // ---- host-side path bookkeeping (no fd held) ----
+    std::string           host_path;         // original path, e.g. "/mnt/.../foo.bin"
+    std::string           refs_path;         // hardlink ref path, e.g. "/mnt/.../.refs/foo.bin"
+    uint64_t              data_offset = 0;   // always 0 now (no header)
 };
 
 } // namespace tutti

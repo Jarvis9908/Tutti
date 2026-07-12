@@ -210,6 +210,33 @@ nvmeservice_daemon --config <path-to-sys_config.yaml>
 - SIGINT/SIGTERM does a clean shutdown: gRPC shutdown → reaper join →
   per-device `nvm_ctrl_free` (which still cascades unbind +
   chrdev_remove because the daemon is the *owner* of every chrdev).
+- **Never `kill -9` this process.** `chrdev_remove` only runs from the
+  graceful SIGINT/SIGTERM path above -- it is a `nvm_ctrl_free()`
+  ioctl the daemon must issue itself, not something the kernel replays
+  automatically on fd-close (unlike per-client queue/DMA state, which
+  *is* reclaimed for free on fd-close -- see the reaper's "kernel
+  fd-close already reclaimed the actual queues / DATA maps" log
+  line). A `SIGKILL`'d daemon leaves its `struct ctrl` for each BDF
+  still registered kernel-side, so the next `SNVM_CHRDEV_CREATE` for
+  that BDF can fail (`errno=14` on an un-rebuilt/un-reloaded module --
+  see PORTING.md's troubleshooting table for the `snvm_chrdev_helper`
+  idempotent-create fix).
+  **Important correction**: this is a *userspace state* problem, not
+  a kernel module refcount leak -- the Linux cdev framework auto-pairs
+  `try_module_get`/`module_put` on every open()/fd-close of
+  `/dev/snvm_control` and `/dev/ssnvme*` regardless of signal, and
+  neither `SNVM_DEVICE_UNBIND` nor `SNVM_CHRDEV_REMOVE` touches the
+  module refcount at all.  If `rmmod snvme` says "Module snvme is in
+  use" after a SIGKILL'd daemon, do NOT assume it's this; check for a
+  mounted `/dev/snvme*n*` block device or an open raw `/dev/snvme<N>`
+  admin chardev first (`scripts/reset_snvme.sh` step 2b does this
+  automatically) -- those are the two refs that actually outlive the
+  daemon and that no owner-side ioctl ever releases.
+  See `scripts/reset_snvme.sh`, which sends SIGTERM + waits before
+  ever escalating to SIGKILL.  A `(deleted)` `/proc/<pid>/exe` is a
+  harmless rebuild artifact, NOT a sign the daemon is stale -- confirm
+  it is actually unresponsive (dead PID, no recent log activity)
+  before touching it.
 
 ### `nvmeservice_client`
 
@@ -291,7 +318,7 @@ Hard invariants you can rely on:
 
 ## In-process API (libnvmeservice_client)
 
-If you embed NVMeService into a larger application (geminifs, your
+If you embed NVMeService into a larger application (Tutti, your
 own filesystem, an inference runtime, …), link `nvmeservice` and use:
 
 ```cpp

@@ -8,7 +8,7 @@
  *
  * Role:
  *   - The runtime-visible `Lease` value type lives in
- *     `runtime/include/lease.h`. This header defines the *service*
+ *     `coordinator/include/lease.h`. This header defines the *service*
  *     that issues, refreshes, releases, and reaps those leases.
  *   - Splitting noun (Lease) from service (ILeaseManager) follows the
  *     "device_manager owns process-spanning resource management;
@@ -39,7 +39,7 @@
 #include <cstdint>
 #include <string>
 
-#include "../../runtime/include/lease.h"   // struct Lease, LeaseKind
+#include "../../coordinator/include/lease.h"   // struct Lease, LeaseKind
 
 namespace tutti {
 

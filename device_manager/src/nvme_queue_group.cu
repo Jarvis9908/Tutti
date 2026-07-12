@@ -109,10 +109,23 @@ void NvmeQueueGroup::init_(uint32_t ns_id,
     // Authoritative caps come from kernel: NVM_MAX_QUEUES_PER_GROUP
     // bounds per-group user-queue count, and the user QID pool
     // [start_cq_idx, max_user_qid] bounds the absolute queue count.
-    uint32_t qpool_room = (ctrl_->max_user_qid >= ctrl_->start_cq_idx)
-                            ? (ctrl_->max_user_qid - ctrl_->start_cq_idx + 1)
-                            : 0;
-    uint32_t kernel_cap = std::min<uint32_t>(max_q, qpool_room);
+    //
+    // Client (service) mode: a ctrl from nvm_ctrl_attach_client never
+    // ran NVM_GET_DEV_INFO, so the pool bounds (max_user_qid /
+    // start_cq_idx) are BOTH zero here.  In that case the pool bound is
+    // not knowable client-side -- the daemon already capped the grant
+    // (encoded in `num_queues`), and the kernel enforces the absolute
+    // pool on NVM_ADD_USER_QUEUE.  Fall back to the per-group max
+    // (max_q) and let num_queues + kernel enforcement do the clamping.
+    uint32_t kernel_cap;
+    if (ctrl_->max_user_qid == 0 && ctrl_->start_cq_idx == 0) {
+        kernel_cap = max_q;
+    } else {
+        uint32_t qpool_room = (ctrl_->max_user_qid >= ctrl_->start_cq_idx)
+                                ? (ctrl_->max_user_qid - ctrl_->start_cq_idx + 1)
+                                : 0;
+        kernel_cap = std::min<uint32_t>(max_q, qpool_room);
+    }
     if (kernel_cap == 0) {
         char buf[160];
         std::snprintf(buf, sizeof(buf),

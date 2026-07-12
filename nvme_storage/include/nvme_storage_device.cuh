@@ -59,10 +59,36 @@
 
 namespace tutti {
 
+/// Try to satisfy a resolved (want_blk_first, want_blk_last) range from
+/// one extent starting at LBA-space offset `ext_start`.  On a hit,
+/// writes the outputs and returns true.  Free function (not a lambda)
+/// so it compiles the same regardless of --expt-extended-lambda support;
+/// shared by both the inline and overflow walks in resolve_lba below.
+__device__ __forceinline__
+bool try_lba_extent(const LbaExtent& ext,
+                    uint64_t          ext_start,
+                    uint64_t          want_blk_first,
+                    uint64_t          want_blk_last,
+                    uint64_t          want_blk_count,
+                    uint64_t*         starting_lba_out,
+                    uint64_t*         n_blocks_out)
+{
+    const uint64_t ext_end = ext_start + ext.length_blocks;
+    if (want_blk_first >= ext_start && want_blk_last <= ext_end) {
+        const uint64_t off_in_ext = want_blk_first - ext_start;
+        *starting_lba_out = ext.start_lba + off_in_ext;
+        *n_blocks_out     = want_blk_count;
+        return true;
+    }
+    return false;
+}
+
 /// Map a (logical_off_bytes, nbytes) request inside this file
 /// onto a (starting_lba, n_blocks) span on the underlying NVMe
-/// namespace.  Walks `handle->extents` and adds `header_bytes` to
-/// the logical offset before searching.
+/// namespace.  Walks `handle->extents` (inline) then
+/// `handle->extents_overflow` (rare: files whose FIEMAP extent count
+/// exceeds kNvmeFileDeviceHandleInlineExtents) and adds
+/// `header_bytes` to the logical offset before searching.
 ///
 /// Returns true on success.  Returns false (and leaves the out
 /// values untouched) if:
@@ -96,18 +122,33 @@ bool resolve_lba(const NvmeFileDeviceHandle* h,
     const uint64_t want_blk_last  = want_blk_first + want_blk_count;  // exclusive
 
     uint64_t cursor = 0;
-    for (uint32_t i = 0; i < h->num_extents; ++i) {
-        const uint64_t ext_start = cursor;
-        const uint64_t ext_end   = cursor + h->extents[i].length_blocks;
-        if (want_blk_first >= ext_start && want_blk_last <= ext_end) {
-            const uint64_t off_in_ext = want_blk_first - ext_start;
-            *starting_lba_out =
-                h->extents[i].start_lba + off_in_ext;
-            *n_blocks_out     = want_blk_count;
+
+    // (1) Inline extents -- the common case (see nvme_file_device_handle.h
+    //     sizing note); most files never reach the overflow branch below.
+    const uint32_t n_inline = h->num_extents < kNvmeFileDeviceHandleInlineExtents
+                             ? h->num_extents
+                             : kNvmeFileDeviceHandleInlineExtents;
+    for (uint32_t i = 0; i < n_inline; ++i) {
+        if (try_lba_extent(h->extents[i], cursor, want_blk_first, want_blk_last,
+                           want_blk_count, starting_lba_out, n_blocks_out))
             return true;
-        }
-        cursor = ext_end;
+        cursor += h->extents[i].length_blocks;
     }
+
+    // (2) Overflow extents -- only files whose FIEMAP extent count
+    //     exceeds the inline cap (heavy fragmentation) allocate this.
+    if (h->num_extents > kNvmeFileDeviceHandleInlineExtents &&
+        h->extents_overflow != nullptr) {
+        const uint32_t n_overflow = h->num_extents - kNvmeFileDeviceHandleInlineExtents;
+        for (uint32_t j = 0; j < n_overflow; ++j) {
+            if (try_lba_extent(h->extents_overflow[j], cursor, want_blk_first,
+                               want_blk_last, want_blk_count,
+                               starting_lba_out, n_blocks_out))
+                return true;
+            cursor += h->extents_overflow[j].length_blocks;
+        }
+    }
+
     return false;  // not found OR spans extents
 }
 

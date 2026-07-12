@@ -1,0 +1,1761 @@
+--- /data/home/ryeqiu/Geminifs/temp/nvme-5.15.0/host/pci.c	2026-05-07 19:35:41.823229158 +0800
++++ /data/home/ryeqiu/Geminifs/backends/local/kernel_modules/snvme-5.15.0/pci.c	2026-05-12 10:26:13.680313268 +0800
+@@ -1,7 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * NVM Express device driver
+- * Copyright (c) 2011-2014, Intel Corporation.
++ * Modified NVM Express device driver
+  */
+ 
+ #include <linux/acpi.h>
+@@ -26,15 +25,73 @@
+ #include <linux/io-64-nonatomic-hi-lo.h>
+ #include <linux/sed-opal.h>
+ #include <linux/pci-p2pdma.h>
++#include <linux/device/driver.h>
+ 
+-#include "trace.h"
++#include "asm/string_64.h"
++#include "linux/device.h"
++#include "linux/idr.h"
++#include "linux/printk.h"
++#include "linux/uaccess.h"
++#include "map.h"
++#include "ioctl.h"
+ #include "nvme.h"
++#include "nvfs-pci.h"
++#include "list.h"
++#include "ctrl.h"
++#include "nvfs-p2p.h"
++
++#define DRIVER_NAME         "libsnvm helper"
++#define PCI_DRIVER_NAME		"snvme"
++
++MODULE_IMPORT_NS(NVME_TARGET_PASSTHRU);
++
++static dev_t dev_first;
++static DEFINE_IDA(snvm_chrdev_minor_ida);
++dev_t  snvm_devno;
++// static struct device snvm_dev; //snvme device
++struct cdev snvm_cdev; //snvme cdev
++
++static struct mutex snvm_control_lock;
++static unsigned int snvm_registered;
++/* Device class */
++static struct class* dev_class;
++
++
++/* List of controller devices */
++static struct list ctrl_list;
++
++
++/* List of mapped host memory */
++static struct list host_list;
++
++
++/* List of mapped device memory */
++static struct list device_list;
++
++/* List of mapped device queue memory */
++static struct list device_queue_list;
++
++/* Number of devices */
++static int max_num_ctrls = 64;
++module_param(max_num_ctrls, int, 0);
++MODULE_PARM_DESC(max_num_ctrls, "Number of controller devices");
++
++static int curr_ctrls = 0;
+ 
+ #define SQ_SIZE(q)	((q)->q_depth << (q)->sqes)
+ #define CQ_SIZE(q)	((q)->q_depth * sizeof(struct nvme_completion))
++#define TO_PCI_DEV(addr) pci_get_domain_bus_and_slot(addr.domain, addr.bus, PCI_DEVFN(addr.slot, addr.func))
+ 
+ #define SGES_PER_PAGE	(PAGE_SIZE / sizeof(struct nvme_sgl_desc))
+-
++// static uint64_t gpu_bdf_map[64][16];
++// static uint64_t nvme_bdf_map[64][16];
++// // index tables
++// static uint64_t gpu_info_table[64];
++// static uint64_t nvme_info_table[64];
++
++struct nvme_gpu_map **snvme;
++int nvme_num;
++int gpu_num;
+ /*
+  * These can be higher, but we need to ensure that any command doesn't
+  * require an sg allocation that needs more than a page of data.
+@@ -120,6 +177,8 @@
+ 	struct dma_pool *prp_page_pool;
+ 	struct dma_pool *prp_small_pool;
+ 	unsigned online_queues;
++	unsigned online_user_queues;
++	unsigned user_start_qid;
+ 	unsigned max_qid;
+ 	unsigned io_queues[HCTX_MAX_TYPES];
+ 	unsigned int num_vecs;
+@@ -156,7 +215,13 @@
+ 	unsigned int nr_allocated_queues;
+ 	unsigned int nr_write_queues;
+ 	unsigned int nr_poll_queues;
+-
++	unsigned int nr_user_allocated_queues;
++	unsigned int nr_user_allocated_cq;
++	unsigned int nr_user_use_cq;
++	unsigned int nr_user_allocated_sq;
++	unsigned int nr_user_use_sq;
++	unsigned int use_user_allocated;
++	unsigned int queue_on_host;
+ 	bool attrs_added;
+ };
+ 
+@@ -286,7 +351,7 @@
+ {
+ 	if (!dev->dbbuf_dbs || !qid)
+ 		return;
+-
++	printk("nvme_dbbuf_init\n");
+ 	nvmeq->dbbuf_sq_db = &dev->dbbuf_dbs[sq_idx(qid, dev->db_stride)];
+ 	nvmeq->dbbuf_cq_db = &dev->dbbuf_dbs[cq_idx(qid, dev->db_stride)];
+ 	nvmeq->dbbuf_sq_ei = &dev->dbbuf_eis[sq_idx(qid, dev->db_stride)];
+@@ -316,7 +381,7 @@
+ 	c.dbbuf.prp1 = cpu_to_le64(dev->dbbuf_dbs_dma_addr);
+ 	c.dbbuf.prp2 = cpu_to_le64(dev->dbbuf_eis_dma_addr);
+ 
+-	if (nvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0)) {
++	if (snvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0)) {
+ 		dev_warn(dev->ctrl.device, "unable to set dbbuf\n");
+ 		/* Free memory and continue on */
+ 		nvme_dbbuf_dma_free(dev);
+@@ -930,9 +995,9 @@
+ 		return BLK_STS_IOERR;
+ 
+ 	if (!nvme_check_ready(&dev->ctrl, req, true))
+-		return nvme_fail_nonready_command(&dev->ctrl, req);
++		return snvme_fail_nonready_command(&dev->ctrl, req);
+ 
+-	ret = nvme_setup_cmd(ns, req);
++	ret = snvme_setup_cmd(ns, req);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -954,7 +1019,7 @@
+ out_unmap_data:
+ 	nvme_unmap_data(dev, req);
+ out_free_cmd:
+-	nvme_cleanup_cmd(req);
++	snvme_cleanup_cmd(req);
+ 	return ret;
+ }
+ 
+@@ -968,7 +1033,7 @@
+ 			       rq_integrity_vec(req)->bv_len, rq_data_dir(req));
+ 	if (blk_rq_nr_phys_segments(req))
+ 		nvme_unmap_data(dev, req);
+-	nvme_complete_rq(req);
++	snvme_complete_rq(req);
+ }
+ 
+ /* We read the CQE phase first to check if the rest of the entry is valid */
+@@ -1008,7 +1073,7 @@
+ 	 * for them but rather special case them here.
+ 	 */
+ 	if (unlikely(nvme_is_aen_req(nvmeq->qid, command_id))) {
+-		nvme_complete_async_event(&nvmeq->dev->ctrl,
++		snvme_complete_async_event(&nvmeq->dev->ctrl,
+ 				cqe->status, &cqe->result);
+ 		return;
+ 	}
+@@ -1021,7 +1086,7 @@
+ 		return;
+ 	}
+ 
+-	trace_nvme_sq(req, cqe->sq_head, nvmeq->sq_tail);
++
+ 	if (!nvme_try_complete_req(req, cqe->status, cqe->result))
+ 		nvme_pci_complete_rq(req);
+ }
+@@ -1124,7 +1189,7 @@
+ 	c.delete_queue.opcode = opcode;
+ 	c.delete_queue.qid = cpu_to_le16(id);
+ 
+-	return nvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
++	return snvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
+ }
+ 
+ static int adapter_alloc_cq(struct nvme_dev *dev, u16 qid,
+@@ -1146,8 +1211,8 @@
+ 	c.create_cq.qsize = cpu_to_le16(nvmeq->q_depth - 1);
+ 	c.create_cq.cq_flags = cpu_to_le16(flags);
+ 	c.create_cq.irq_vector = cpu_to_le16(vector);
+-
+-	return nvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
++	// printk("adapter_alloc_cq qid is %u\n",c.create_cq.cq_flags);
++	return snvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
+ }
+ 
+ static int adapter_alloc_sq(struct nvme_dev *dev, u16 qid,
+@@ -1175,8 +1240,56 @@
+ 	c.create_sq.qsize = cpu_to_le16(nvmeq->q_depth - 1);
+ 	c.create_sq.sq_flags = cpu_to_le16(flags);
+ 	c.create_sq.cqid = cpu_to_le16(qid);
++	// printk("adapter_alloc_sq q_depth is %u\n",nvmeq->q_depth);
++	// printk("adapter_alloc_sq qid is,cq id %u\n",c.create_sq.sqid,c.create_sq.cqid);
++	return snvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
++}
+ 
+-	return nvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
++static int adapter_alloc_cq_user(struct nvme_dev *dev, struct map* q_map,int qid)
++{
++	struct nvme_command c = { };
++	int flags = NVME_QUEUE_PHYS_CONTIG;
++
++	/*
++	 * Note: we (ab)use the fact that the prp fields survive if no data
++	 * is attached to the request.
++	 */
++	c.create_cq.opcode = nvme_admin_create_cq;
++	c.create_cq.prp1 = cpu_to_le64(q_map->addrs[0]);
++	c.create_cq.cqid = cpu_to_le16(qid);
++	c.create_cq.qsize = cpu_to_le16(dev->q_depth-1);
++	c.create_cq.cq_flags = cpu_to_le16(flags);
++	c.create_cq.irq_vector = cpu_to_le16(0);
++	// printk("adapter_alloc_cq_user qid is %u, addr is %lx,q depth is %d,cq_flags is %u\n",qid,q_map->addrs[0],c.create_cq.qsize,c.create_cq.cq_flags);
++	// printk("adapter_alloc_cq qid is %u\n",c.create_cq.cq_flags);
++	return snvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
++}
++
++static int adapter_alloc_sq_user(struct nvme_dev *dev, struct map* q_map,int qid)
++{
++
++	struct nvme_command c = { };
++	int flags = NVME_QUEUE_PHYS_CONTIG;
++
++	/*
++	 * Some drives have a bug that auto-enables WRRU if MEDIUM isn't
++	 * set. Since URGENT priority is zeroes, it makes all queues
++	 * URGENT.
++	 */
++
++	/*
++	 * Note: we (ab)use the fact that the prp fields survive if no data
++	 * is attached to the request.
++	 */
++	c.create_sq.opcode = nvme_admin_create_sq;
++	c.create_sq.prp1 = cpu_to_le64(q_map->addrs[0]);
++	c.create_sq.sqid = cpu_to_le16(qid);
++	c.create_sq.qsize = cpu_to_le16(dev->q_depth-1);
++	c.create_sq.sq_flags = cpu_to_le16(flags);
++	c.create_sq.cqid = cpu_to_le16(qid);
++	// printk("adapter_alloc_sq_user qid is %u, addr is %lx,q depth is %d\n",qid,q_map->addrs[0],dev->q_depth - 1);
++	// printk("adapter_alloc_sq_user qid is,cq id %u\n",c.create_sq.sqid,c.create_sq.cqid);
++	return snvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
+ }
+ 
+ static int adapter_delete_cq(struct nvme_dev *dev, u16 cqid)
+@@ -1265,7 +1378,7 @@
+ 	if (nvme_should_reset(dev, csts)) {
+ 		nvme_warn_reset(dev, csts);
+ 		nvme_dev_disable(dev, false);
+-		nvme_reset_ctrl(&dev->ctrl);
++		snvme_reset_ctrl(&dev->ctrl);
+ 		return BLK_EH_DONE;
+ 	}
+ 
+@@ -1292,7 +1405,7 @@
+ 	 */
+ 	switch (dev->ctrl.state) {
+ 	case NVME_CTRL_CONNECTING:
+-		nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DELETING);
++		snvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DELETING);
+ 		fallthrough;
+ 	case NVME_CTRL_DELETING:
+ 		dev_warn_ratelimited(dev->ctrl.device,
+@@ -1318,7 +1431,7 @@
+ 			 req->tag, nvmeq->qid);
+ 		nvme_req(req)->flags |= NVME_REQ_CANCELLED;
+ 		nvme_dev_disable(dev, false);
+-		nvme_reset_ctrl(&dev->ctrl);
++		snvme_reset_ctrl(&dev->ctrl);
+ 
+ 		return BLK_EH_DONE;
+ 	}
+@@ -1337,7 +1450,7 @@
+ 		"I/O %d QID %d timeout, aborting\n",
+ 		 req->tag, nvmeq->qid);
+ 
+-	abort_req = nvme_alloc_request(dev->ctrl.admin_q, &cmd,
++	abort_req = snvme_alloc_request(dev->ctrl.admin_q, &cmd,
+ 			BLK_MQ_REQ_NOWAIT);
+ 	if (IS_ERR(abort_req)) {
+ 		atomic_inc(&dev->ctrl.abort_limit);
+@@ -1355,7 +1468,8 @@
+ 	return BLK_EH_RESET_TIMER;
+ }
+ 
+-static void nvme_free_queue(struct nvme_queue *nvmeq)
++// pay attention on it
++static void nvme_free_queue(struct nvme_queue *nvmeq) 
+ {
+ 	dma_free_coherent(nvmeq->dev->dev, CQ_SIZE(nvmeq),
+ 				(void *)nvmeq->cqes, nvmeq->cq_dma_addr);
+@@ -1414,9 +1528,9 @@
+ 	struct nvme_queue *nvmeq = &dev->queues[0];
+ 
+ 	if (shutdown)
+-		nvme_shutdown_ctrl(&dev->ctrl);
++		snvme_shutdown_ctrl(&dev->ctrl);
+ 	else
+-		nvme_disable_ctrl(&dev->ctrl);
++		snvme_disable_ctrl(&dev->ctrl);
+ 
+ 	nvme_poll_irqdisable(nvmeq);
+ }
+@@ -1425,7 +1539,7 @@
+  * Called only on a device that has been disabled and after all other threads
+  * that can check this device's completion queues have synced, except
+  * nvme_poll(). This is the last chance for the driver to see a natural
+- * completion before nvme_cancel_request() terminates all incomplete requests.
++ * completion before snvme_cancel_request() terminates all incomplete requests.
+  */
+ static void nvme_reap_pending_cqes(struct nvme_dev *dev)
+ {
+@@ -1489,6 +1603,7 @@
+ 	return 0;
+ }
+ 
++/*allocate sqes and cqes, and retuen its dma addr, and allocate the qid*/
+ static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)
+ {
+ 	struct nvme_queue *nvmeq = &dev->queues[qid];
+@@ -1500,6 +1615,7 @@
+ 	nvmeq->q_depth = depth;
+ 	nvmeq->cqes = dma_alloc_coherent(dev->dev, CQ_SIZE(nvmeq),
+ 					 &nvmeq->cq_dma_addr, GFP_KERNEL);
++
+ 	if (!nvmeq->cqes)
+ 		goto free_nvmeq;
+ 
+@@ -1531,10 +1647,10 @@
+ 
+ 	if (use_threaded_interrupts) {
+ 		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq_check,
+-				nvme_irq, nvmeq, "nvme%dq%d", nr, nvmeq->qid);
++				nvme_irq, nvmeq, "snvme%dq%d", nr, nvmeq->qid);
+ 	} else {
+ 		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq,
+-				NULL, nvmeq, "nvme%dq%d", nr, nvmeq->qid);
++				NULL, nvmeq, "snvme%dq%d", nr, nvmeq->qid);
+ 	}
+ }
+ 
+@@ -1547,6 +1663,7 @@
+ 	nvmeq->cq_head = 0;
+ 	nvmeq->cq_phase = 1;
+ 	nvmeq->q_db = &dev->dbs[qid * 2 * dev->db_stride];
++	// printk("q id is %u, ab addr is %lx",qid,nvmeq->q_db);
+ 	memset((void *)nvmeq->cqes, 0, CQ_SIZE(nvmeq));
+ 	nvme_dbbuf_init(dev, nvmeq, qid);
+ 	dev->online_queues++;
+@@ -1591,11 +1708,9 @@
+ 		vector = dev->num_vecs == 1 ? 0 : qid;
+ 	else
+ 		set_bit(NVMEQ_POLLED, &nvmeq->flags);
+-
+ 	result = adapter_alloc_cq(dev, qid, nvmeq, vector);
+ 	if (result)
+ 		return result;
+-
+ 	result = adapter_alloc_sq(dev, qid, nvmeq);
+ 	if (result < 0)
+ 		return result;
+@@ -1627,6 +1742,66 @@
+ 	return result;
+ }
+ 
++static int nvme_create_user_queue(struct nvme_dev *dev , int uqid,int qid)
++{
++
++	int result;
++
++
++	struct pci_dev *pdev = to_pci_dev(dev->dev);
++	struct map* q_map; 
++	struct list* list;
++		
++	if(dev->queue_on_host)
++		list = &host_list;
++	else
++		list = &device_queue_list;
++	/*
++	 * A queue's vector matches the queue identifier unless the controller
++	 * has only one vector available.
++	 */
++	q_map = map_find_by_pci_dev_and_idx(list,pdev,uqid,1);
++	if(q_map==NULL)
++	{
++		printk("map_find_by_pci_dev_and_idx cq error!\n");
++		return -1;
++	}
++	result = adapter_alloc_cq_user(dev, q_map,qid);
++	if (result)
++		return result;
++
++	q_map = map_find_by_pci_dev_and_idx(list,pdev,uqid,0);
++	if(q_map==NULL)
++	{
++		printk("map_find_by_pci_dev_and_idx sq error!\n");
++		result = -1;
++		goto release_cq;
++	}
++	// printk("adapter_alloc_sq qid is %d\n",qid);
++	result = adapter_alloc_sq_user(dev, q_map,qid);
++	if (result < 0)
++		return result;
++	if (result)
++		goto release_cq;
++
++	result = nvme_setup_io_queues_trylock(dev);
++	if (result)
++		return result;
++	// nvme_init_queue(nvmeq, qid);
++	dev->online_user_queues++;
++	wmb(); /* ensure the first interrupt sees the initialization */
++	mutex_unlock(&dev->shutdown_lock);
++
++	return result;
++
++	dev->online_user_queues--;
++	mutex_unlock(&dev->shutdown_lock);
++	adapter_delete_sq(dev, qid);
++release_cq:
++	adapter_delete_cq(dev, qid);
++	return result;
++}
++
+ static const struct blk_mq_ops nvme_mq_admin_ops = {
+ 	.queue_rq	= nvme_queue_rq,
+ 	.complete	= nvme_pci_complete_rq,
+@@ -1706,6 +1881,7 @@
+ 		return 0;
+ 	if (size > pci_resource_len(pdev, 0))
+ 		return -ENOMEM;
++	printk("nvme_remap_bar bar size is %llx\n", pci_resource_len(pdev, 0));
+ 	if (dev->bar)
+ 		iounmap(dev->bar);
+ 	dev->bar = ioremap(pci_resource_start(pdev, 0), size);
+@@ -1736,7 +1912,7 @@
+ 	    (readl(dev->bar + NVME_REG_CSTS) & NVME_CSTS_NSSRO))
+ 		writel(NVME_CSTS_NSSRO, dev->bar + NVME_REG_CSTS);
+ 
+-	result = nvme_disable_ctrl(&dev->ctrl);
++	result = snvme_disable_ctrl(&dev->ctrl);
+ 	if (result < 0)
+ 		return result;
+ 
+@@ -1754,7 +1930,7 @@
+ 	lo_hi_writeq(nvmeq->sq_dma_addr, dev->bar + NVME_REG_ASQ);
+ 	lo_hi_writeq(nvmeq->cq_dma_addr, dev->bar + NVME_REG_ACQ);
+ 
+-	result = nvme_enable_ctrl(&dev->ctrl);
++	result = snvme_enable_ctrl(&dev->ctrl);
+ 	if (result)
+ 		return result;
+ 
+@@ -1770,6 +1946,37 @@
+ 	return result;
+ }
+ 
++static int nvme_create_io_queues_mix(struct nvme_dev *dev)
++{
++	unsigned i;
++	int ret = 0;
++	int k_q_max_id;
++
++	int count;
++	/*admin cq sq, rw q, polled queue  */
++
++	k_q_max_id = dev->max_qid + dev->nr_user_use_cq;
++
++	printk("nvme_create_io_queues_mix k_q_max_id is %d, online_queues is %d\n",k_q_max_id,dev->online_queues);
++
++
++	count = 0;
++	dev->user_start_qid = dev->online_queues;
++	for (i = dev->online_queues; i <= k_q_max_id; i++) {
++		ret = nvme_create_user_queue(dev,count,i);
++		if (ret)
++			break;
++		count++;
++	}
++	/*
++	 * Ignore failing Create SQ/CQ commands, we can continue with less
++	 * than the desired amount of queues, and even a controller without
++	 * I/O queues can still be used to issue admin commands.  This might
++	 * be useful to upgrade a buggy firmware for example.
++	 */
++	return ret >= 0 ? 0 : ret;
++}
++
+ static int nvme_create_io_queues(struct nvme_dev *dev)
+ {
+ 	unsigned i, max, rw_queues;
+@@ -1806,7 +2013,6 @@
+ 	 */
+ 	return ret >= 0 ? 0 : ret;
+ }
+-
+ static u64 nvme_cmb_size_unit(struct nvme_dev *dev)
+ {
+ 	u8 szu = (dev->cmbsz >> NVME_CMBSZ_SZU_SHIFT) & NVME_CMBSZ_SZU_MASK;
+@@ -1892,7 +2098,7 @@
+ 	c.features.dword14	= cpu_to_le32(upper_32_bits(dma_addr));
+ 	c.features.dword15	= cpu_to_le32(dev->nr_host_mem_descs);
+ 
+-	ret = nvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
++	ret = snvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);
+ 	if (ret) {
+ 		dev_warn(dev->ctrl.device,
+ 			 "failed to set host mem (err %d, flags %#x).\n",
+@@ -2243,14 +2449,14 @@
+ 	return num_possible_cpus() + dev->nr_write_queues + dev->nr_poll_queues;
+ }
+ 
+-static int nvme_setup_io_queues(struct nvme_dev *dev)
++static int s_nvme_setup_io_queues(struct nvme_dev *dev)
+ {
+ 	struct nvme_queue *adminq = &dev->queues[0];
+ 	struct pci_dev *pdev = to_pci_dev(dev->dev);
+ 	unsigned int nr_io_queues;
+ 	unsigned long size;
+ 	int result;
+-
++	unsigned int expect_num;
+ 	/*
+ 	 * Sample the module parameters once at reset time so that we have
+ 	 * stable values to work with.
+@@ -2259,7 +2465,37 @@
+ 	dev->nr_poll_queues = poll_queues;
+ 
+ 	nr_io_queues = dev->nr_allocated_queues - 1;
+-	result = nvme_set_queue_count(&dev->ctrl, &nr_io_queues);
++	// To add the user_allocated_queues to the total num of queue 
++	if(dev->use_user_allocated)
++	{
++		expect_num = dev->nr_user_allocated_cq + nr_io_queues;
++		nr_io_queues += dev->nr_user_allocated_cq;
++	}
++	
++	result = snvme_set_queue_count(&dev->ctrl, &nr_io_queues);
++
++	if (dev->use_user_allocated){
++		if (nr_io_queues < dev->nr_allocated_queues - 1){
++			dev->use_user_allocated = 0;
++			printk("snvme_set_queue_count fail, can not allocate more ioqs\n");
++		} else if (nr_io_queues <= expect_num){	
++			// user allocted more than controller limit
++			if (dev->nr_user_allocated_cq > nr_io_queues - 1){
++				dev->use_user_allocated = 0;
++				printk("to many user queues\n");
++			} else{
++				dev->nr_allocated_queues = nr_io_queues - dev->nr_user_allocated_cq;
++				nr_io_queues = dev->nr_allocated_queues - 1;
++				dev->nr_user_use_cq = dev->nr_user_allocated_cq;
++				dev->nr_user_use_sq = dev->nr_user_allocated_sq;
++				printk("force change nr_allocated_queues to %d\n",dev->nr_allocated_queues);
++				printk("snvme_set_queue_count succsee, but controller limit max, exp is %u, kernel is %u, user is %u\n",expect_num,nr_io_queues,dev->nr_user_use_cq);	
++			}
++		}
++	}
++
++
++	
+ 	if (result < 0)
+ 		return result;
+ 
+@@ -2311,6 +2547,8 @@
+ 	 */
+ 	pci_free_irq_vectors(pdev);
+ 
++	/*user definded queue dose need irq*/
++
+ 	result = nvme_setup_irqs(dev, nr_io_queues);
+ 	if (result <= 0) {
+ 		result = -EIO;
+@@ -2320,7 +2558,8 @@
+ 	dev->num_vecs = result;
+ 	result = max(result - 1, 1);
+ 	dev->max_qid = result + dev->io_queues[HCTX_TYPE_POLL];
+-
++	printk("nvme_setup_io_queues max_id is %d\n",dev->max_qid);
++	printk("nvme_setup_io_queues online_queues is %d\n",dev->online_queues);
+ 	/*
+ 	 * Should investigate if there's a performance win from allocating
+ 	 * more queues than interrupt vectors; it might allow the submission
+@@ -2334,6 +2573,10 @@
+ 	mutex_unlock(&dev->shutdown_lock);
+ 
+ 	result = nvme_create_io_queues(dev);
++	printk("create io queue finish max_id is %d, online_queues is %d\n",dev->max_qid,dev->online_queues);
++	if(dev->use_user_allocated)
++		result = nvme_create_io_queues_mix(dev);
++
+ 	if (result || dev->online_queues < 2)
+ 		return result;
+ 
+@@ -2346,10 +2589,11 @@
+ 		nvme_suspend_io_queues(dev);
+ 		goto retry;
+ 	}
+-	dev_info(dev->ctrl.device, "%d/%d/%d default/read/poll queues\n",
++	dev_info(dev->ctrl.device, "%d/%d/%d/%d default/read/poll/user queues\n",
+ 					dev->io_queues[HCTX_TYPE_DEFAULT],
+ 					dev->io_queues[HCTX_TYPE_READ],
+-					dev->io_queues[HCTX_TYPE_POLL]);
++					dev->io_queues[HCTX_TYPE_POLL],
++					dev->nr_user_use_cq);
+ 	return 0;
+ out_unlock:
+ 	mutex_unlock(&dev->shutdown_lock);
+@@ -2383,7 +2627,7 @@
+ 	cmd.delete_queue.opcode = opcode;
+ 	cmd.delete_queue.qid = cpu_to_le16(nvmeq->qid);
+ 
+-	req = nvme_alloc_request(q, &cmd, BLK_MQ_REQ_NOWAIT);
++	req = snvme_alloc_request(q, &cmd, BLK_MQ_REQ_NOWAIT);
+ 	if (IS_ERR(req))
+ 		return PTR_ERR(req);
+ 
+@@ -2501,10 +2745,12 @@
+ 
+ 	dev->q_depth = min_t(u32, NVME_CAP_MQES(dev->ctrl.cap) + 1,
+ 				io_queue_depth);
++	
+ 	dev->ctrl.sqsize = dev->q_depth - 1; /* 0's based queue depth */
+ 	dev->db_stride = 1 << NVME_CAP_STRIDE(dev->ctrl.cap);
++	
+ 	dev->dbs = dev->bar + 4096;
+-
++	printk("nvme_pci_enable is dev->q_depth %u\n",dev->q_depth);
+ 	/*
+ 	 * Some Apple controllers require a non-standard SQE size.
+ 	 * Interestingly they also seem to ignore the CC:IOSQES register
+@@ -2586,7 +2832,7 @@
+ 		if (dev->ctrl.state == NVME_CTRL_LIVE ||
+ 		    dev->ctrl.state == NVME_CTRL_RESETTING) {
+ 			freeze = true;
+-			nvme_start_freeze(&dev->ctrl);
++			snvme_start_freeze(&dev->ctrl);
+ 		}
+ 		dead = !!((csts & NVME_CSTS_CFS) || !(csts & NVME_CSTS_RDY) ||
+ 			pdev->error_state  != pci_channel_io_normal);
+@@ -2597,9 +2843,9 @@
+ 	 * doing a safe shutdown.
+ 	 */
+ 	if (!dead && shutdown && freeze)
+-		nvme_wait_freeze_timeout(&dev->ctrl, NVME_IO_TIMEOUT);
++		snvme_wait_freeze_timeout(&dev->ctrl, NVME_IO_TIMEOUT);
+ 
+-	nvme_stop_queues(&dev->ctrl);
++	snvme_stop_queues(&dev->ctrl);
+ 
+ 	if (!dead && dev->ctrl.queue_count > 0) {
+ 		nvme_disable_io_queues(dev);
+@@ -2610,8 +2856,8 @@
+ 	nvme_pci_disable(dev);
+ 	nvme_reap_pending_cqes(dev);
+ 
+-	blk_mq_tagset_busy_iter(&dev->tagset, nvme_cancel_request, &dev->ctrl);
+-	blk_mq_tagset_busy_iter(&dev->admin_tagset, nvme_cancel_request, &dev->ctrl);
++	blk_mq_tagset_busy_iter(&dev->tagset, snvme_cancel_request, &dev->ctrl);
++	blk_mq_tagset_busy_iter(&dev->admin_tagset, snvme_cancel_request, &dev->ctrl);
+ 	blk_mq_tagset_wait_completed_request(&dev->tagset);
+ 	blk_mq_tagset_wait_completed_request(&dev->admin_tagset);
+ 
+@@ -2621,7 +2867,7 @@
+ 	 * deadlocking blk-mq hot-cpu notifier.
+ 	 */
+ 	if (shutdown) {
+-		nvme_start_queues(&dev->ctrl);
++		snvme_start_queues(&dev->ctrl);
+ 		if (dev->ctrl.admin_q && !blk_queue_dying(dev->ctrl.admin_q))
+ 			blk_mq_unquiesce_queue(dev->ctrl.admin_q);
+ 	}
+@@ -2630,7 +2876,7 @@
+ 
+ static int nvme_disable_prepare_reset(struct nvme_dev *dev, bool shutdown)
+ {
+-	if (!nvme_wait_reset(&dev->ctrl))
++	if (!snvme_wait_reset(&dev->ctrl))
+ 		return -EBUSY;
+ 	nvme_dev_disable(dev, shutdown);
+ 	return 0;
+@@ -2685,14 +2931,14 @@
+ static void nvme_remove_dead_ctrl(struct nvme_dev *dev)
+ {
+ 	/*
+-	 * Set state to deleting now to avoid blocking nvme_wait_reset(), which
++	 * Set state to deleting now to avoid blocking snvme_wait_reset(), which
+ 	 * may be holding this pci_dev's device lock.
+ 	 */
+-	nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DELETING);
++	snvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DELETING);
+ 	nvme_get_ctrl(&dev->ctrl);
+ 	nvme_dev_disable(dev, false);
+-	nvme_kill_queues(&dev->ctrl);
+-	if (!queue_work(nvme_wq, &dev->remove_work))
++	snvme_kill_queues(&dev->ctrl);
++	if (!queue_work(s_nvme_wq, &dev->remove_work))
+ 		nvme_put_ctrl(&dev->ctrl);
+ }
+ 
+@@ -2716,13 +2962,13 @@
+ 	 */
+ 	if (dev->ctrl.ctrl_config & NVME_CC_ENABLE)
+ 		nvme_dev_disable(dev, false);
+-	nvme_sync_queues(&dev->ctrl);
++	snvme_sync_queues(&dev->ctrl);
+ 
+ 	mutex_lock(&dev->shutdown_lock);
+ 	result = nvme_pci_enable(dev);
+ 	if (result)
+ 		goto out_unlock;
+-
++	printk("dev->db_stride is %u\n",dev->db_stride);
+ 	result = nvme_pci_configure_admin_queue(dev);
+ 	if (result)
+ 		goto out_unlock;
+@@ -2751,7 +2997,7 @@
+ 	 * Introduce CONNECTING state from nvme-fc/rdma transports to mark the
+ 	 * initializing procedure here.
+ 	 */
+-	if (!nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_CONNECTING)) {
++	if (!snvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_CONNECTING)) {
+ 		dev_warn(dev->ctrl.device,
+ 			"failed to mark controller CONNECTING\n");
+ 		result = -EBUSY;
+@@ -2764,14 +3010,14 @@
+ 	 */
+ 	dev->ctrl.max_integrity_segments = 1;
+ 
+-	result = nvme_init_ctrl_finish(&dev->ctrl);
++	result = snvme_init_ctrl_finish(&dev->ctrl);
+ 	if (result)
+ 		goto out;
+ 
+ 	if (dev->ctrl.oacs & NVME_CTRL_OACS_SEC_SUPP) {
+ 		if (!dev->ctrl.opal_dev)
+ 			dev->ctrl.opal_dev =
+-				init_opal_dev(&dev->ctrl, &nvme_sec_submit);
++				init_opal_dev(&dev->ctrl, &snvme_sec_submit);
+ 		else if (was_suspend)
+ 			opal_unlock_from_suspend(dev->ctrl.opal_dev);
+ 	} else {
+@@ -2792,7 +3038,7 @@
+ 			goto out;
+ 	}
+ 
+-	result = nvme_setup_io_queues(dev);
++	result = s_nvme_setup_io_queues(dev);
+ 	if (result)
+ 		goto out;
+ 
+@@ -2802,21 +3048,21 @@
+ 	 */
+ 	if (dev->online_queues < 2) {
+ 		dev_warn(dev->ctrl.device, "IO queues not created\n");
+-		nvme_kill_queues(&dev->ctrl);
+-		nvme_remove_namespaces(&dev->ctrl);
++		snvme_kill_queues(&dev->ctrl);
++		snvme_remove_namespaces(&dev->ctrl);
+ 		nvme_free_tagset(dev);
+ 	} else {
+-		nvme_start_queues(&dev->ctrl);
+-		nvme_wait_freeze(&dev->ctrl);
++		snvme_start_queues(&dev->ctrl);
++		snvme_wait_freeze(&dev->ctrl);
+ 		nvme_dev_add(dev);
+-		nvme_unfreeze(&dev->ctrl);
++		snvme_unfreeze(&dev->ctrl);
+ 	}
+ 
+ 	/*
+ 	 * If only admin queue live, keep it to do further investigation or
+ 	 * recovery.
+ 	 */
+-	if (!nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_LIVE)) {
++	if (!snvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_LIVE)) {
+ 		dev_warn(dev->ctrl.device,
+ 			"failed to mark controller live state\n");
+ 		result = -ENODEV;
+@@ -2827,7 +3073,7 @@
+ 			&nvme_pci_attr_group))
+ 		dev->attrs_added = true;
+ 
+-	nvme_start_ctrl(&dev->ctrl);
++	snvme_start_ctrl(&dev->ctrl);
+ 	return;
+ 
+  out_unlock:
+@@ -2894,7 +3140,7 @@
+ 	if (pci_request_mem_regions(pdev, "nvme"))
+ 		return -ENODEV;
+ 
+-	if (nvme_remap_bar(dev, NVME_REG_DBS + 4096))
++	if (nvme_remap_bar(dev, NVME_REG_DBS + 4096*3))
+ 		goto release;
+ 
+ 	return 0;
+@@ -2959,9 +3205,41 @@
+ {
+ 	int node, result = -ENOMEM;
+ 	struct nvme_dev *dev;
++	struct ctrl *ctrl;
+ 	unsigned long quirks = id->driver_data;
+ 	size_t alloc_size;
+ 
++	/*
++	 * Opt-in probe gate.
++	 *
++	 * Because pci_register_driver() triggers .probe() for every matching
++	 * PCI device on the bus (including NVMes the caller never asked about),
++	 * SNVMe would otherwise hijack *all* NVMes on the host the moment the
++	 * first SNVM_DEVICE_BIND ioctl is issued. That is not what users want:
++	 * snvm_rebind_driver() only detaches the single target BDF, so the
++	 * other NVMes would be ripped away from the in-tree nvme driver with
++	 * no recovery path short of rmmod snvme + manual rebind.
++	 *
++	 * Require an explicit per-BDF opt-in: the controller must have been
++	 * registered via SNVM_CHRDEV_CREATE (which is how the user declares
++	 * intent) before probe() does anything. If no ctrl record exists,
++	 * return -ENODEV -- the PCI core will then fall through to the next
++	 * matching driver (typically in-tree nvme), leaving the device alone.
++	 *
++	 * NOTE for porters: this is a single-point check; keep it AT THE TOP
++	 * of probe(). If later kernels reshuffle probe entry, preserve this
++	 * invariant or SNVMe will again grab unrelated NVMes.
++	 */
++	ctrl = ctrl_find_by_pci_dev(&ctrl_list, pdev);
++	if (ctrl == NULL) {
++		dev_info(&pdev->dev,
++		         "snvme: no ctrl registered for this BDF, skipping probe "
++		         "(user must call SNVM_CHRDEV_CREATE first)\n");
++		return -ENODEV;
++	}
++	printk("ctrl exist, ioq_num is %u, cq_num is %u, map num is %u\n",
++	       ctrl->ioq_num, ctrl->cq_num, ctrl->ioq_map_num);
++
+ 	node = dev_to_node(&pdev->dev);
+ 	if (node == NUMA_NO_NODE)
+ 		set_dev_node(&pdev->dev, first_memory_node);
+@@ -2970,6 +3248,21 @@
+ 	if (!dev)
+ 		return -ENOMEM;
+ 
++	/*if the map is equal to the pre-set queue num, and set use sreg, reg the user defined io queues*/
++
++	if(ctrl && ctrl->ioq_num == ctrl->ioq_map_num && ctrl->use_sreg)
++	{
++		dev->nr_user_allocated_queues = ctrl->ioq_num;
++		dev->nr_user_allocated_cq = ctrl->cq_num;
++		dev->nr_user_allocated_sq = ctrl->ioq_num - ctrl->cq_num;
++		dev->use_user_allocated = 1;
++		dev->queue_on_host = ctrl->on_host;
++		if(pdev->vendor == 0x8086 && pdev->device==0x4140)
++			printk("this device is p5800x!\n");
++	}
++	else
++		dev->use_user_allocated = 0;
++
+ 	dev->nr_write_queues = write_queues;
+ 	dev->nr_poll_queues = poll_queues;
+ 	dev->nr_allocated_queues = nvme_max_io_queues(dev) + 1;
+@@ -3021,14 +3314,14 @@
+ 		goto release_pools;
+ 	}
+ 
+-	result = nvme_init_ctrl(&dev->ctrl, &pdev->dev, &nvme_pci_ctrl_ops,
++	result = snvme_init_ctrl(&dev->ctrl, &pdev->dev, &nvme_pci_ctrl_ops,
+ 			quirks);
+ 	if (result)
+ 		goto release_mempool;
+ 
+ 	dev_info(dev->ctrl.device, "pci function %s\n", dev_name(&pdev->dev));
+ 
+-	nvme_reset_ctrl(&dev->ctrl);
++	snvme_reset_ctrl(&dev->ctrl);
+ 	async_schedule(nvme_async_probe, dev);
+ 
+ 	return 0;
+@@ -3057,14 +3350,14 @@
+ 	 * with ->remove().
+ 	 */
+ 	nvme_disable_prepare_reset(dev, false);
+-	nvme_sync_queues(&dev->ctrl);
++	snvme_sync_queues(&dev->ctrl);
+ }
+ 
+ static void nvme_reset_done(struct pci_dev *pdev)
+ {
+ 	struct nvme_dev *dev = pci_get_drvdata(pdev);
+ 
+-	if (!nvme_try_sched_reset(&dev->ctrl))
++	if (!snvme_try_sched_reset(&dev->ctrl))
+ 		flush_work(&dev->ctrl.reset_work);
+ }
+ 
+@@ -3091,17 +3384,17 @@
+ {
+ 	struct nvme_dev *dev = pci_get_drvdata(pdev);
+ 
+-	nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DELETING);
++	snvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DELETING);
+ 	pci_set_drvdata(pdev, NULL);
+ 
+ 	if (!pci_device_is_present(pdev)) {
+-		nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DEAD);
++		snvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DEAD);
+ 		nvme_dev_disable(dev, true);
+ 	}
+ 
+ 	flush_work(&dev->ctrl.reset_work);
+-	nvme_stop_ctrl(&dev->ctrl);
+-	nvme_remove_namespaces(&dev->ctrl);
++	snvme_stop_ctrl(&dev->ctrl);
++	snvme_remove_namespaces(&dev->ctrl);
+ 	nvme_dev_disable(dev, true);
+ 	nvme_remove_attrs(dev);
+ 	nvme_free_host_mem(dev);
+@@ -3109,18 +3402,18 @@
+ 	nvme_free_queues(dev, 0);
+ 	nvme_release_prp_pools(dev);
+ 	nvme_dev_unmap(dev);
+-	nvme_uninit_ctrl(&dev->ctrl);
++	snvme_uninit_ctrl(&dev->ctrl);
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+ static int nvme_get_power_state(struct nvme_ctrl *ctrl, u32 *ps)
+ {
+-	return nvme_get_features(ctrl, NVME_FEAT_POWER_MGMT, 0, NULL, 0, ps);
++	return snvme_get_features(ctrl, NVME_FEAT_POWER_MGMT, 0, NULL, 0, ps);
+ }
+ 
+ static int nvme_set_power_state(struct nvme_ctrl *ctrl, u32 ps)
+ {
+-	return nvme_set_features(ctrl, NVME_FEAT_POWER_MGMT, ps, NULL, 0, NULL);
++	return snvme_set_features(ctrl, NVME_FEAT_POWER_MGMT, ps, NULL, 0, NULL);
+ }
+ 
+ static int nvme_resume(struct device *dev)
+@@ -3136,7 +3429,7 @@
+ 
+ 	return 0;
+ reset:
+-	return nvme_try_sched_reset(ctrl);
++	return snvme_try_sched_reset(ctrl);
+ }
+ 
+ static int nvme_suspend(struct device *dev)
+@@ -3166,9 +3459,9 @@
+ 	    (ndev->ctrl.quirks & NVME_QUIRK_SIMPLE_SUSPEND))
+ 		return nvme_disable_prepare_reset(ndev, true);
+ 
+-	nvme_start_freeze(ctrl);
+-	nvme_wait_freeze(ctrl);
+-	nvme_sync_queues(ctrl);
++	snvme_start_freeze(ctrl);
++	snvme_wait_freeze(ctrl);
++	snvme_sync_queues(ctrl);
+ 
+ 	if (ctrl->state != NVME_CTRL_LIVE)
+ 		goto unfreeze;
+@@ -3211,7 +3504,7 @@
+ 		ctrl->npss = 0;
+ 	}
+ unfreeze:
+-	nvme_unfreeze(ctrl);
++	snvme_unfreeze(ctrl);
+ 	return ret;
+ }
+ 
+@@ -3227,7 +3520,7 @@
+ 	struct pci_dev *pdev = to_pci_dev(dev);
+ 	struct nvme_dev *ndev = pci_get_drvdata(pdev);
+ 
+-	return nvme_try_sched_reset(&ndev->ctrl);
++	return snvme_try_sched_reset(&ndev->ctrl);
+ }
+ 
+ static const struct dev_pm_ops nvme_dev_pm_ops = {
+@@ -3272,7 +3565,7 @@
+ 
+ 	dev_info(dev->ctrl.device, "restart after slot reset\n");
+ 	pci_restore_state(pdev);
+-	nvme_reset_ctrl(&dev->ctrl);
++	snvme_reset_ctrl(&dev->ctrl);
+ 	return PCI_ERS_RESULT_RECOVERED;
+ }
+ 
+@@ -3377,8 +3670,397 @@
+ };
+ MODULE_DEVICE_TABLE(pci, nvme_id_table);
+ 
+-static struct pci_driver nvme_driver = {
+-	.name		= "nvme",
++static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
++{
++	int ret = 0;
++    struct ctrl* ctrl = NULL;
++    struct nvm_ioctl_map request;
++    struct map* map = NULL;
++	struct nvme_dev *ndev;
++	struct nvme_ns *ns;
++	struct nvm_ioctl_dev drequest;
++	u64 addr;
++    ctrl = ctrl_find_by_inode(&ctrl_list, file->f_inode);
++    if (ctrl == NULL)
++    {
++        printk(KERN_CRIT "Unknown controller reference snvm_dev_map_ioctl\n");
++        return -EBADF;
++    }
++    switch (cmd)
++    {
++        case NVM_MAP_HOST_MEMORY: // 将用户态地址pin住并得到dma地址返回用户态
++		{
++            if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
++            {
++                return -EFAULT;
++            }
++
++            map = map_userspace(&host_list, ctrl, request.vaddr_start, request.n_pages);
++            /*
++             * Guard against ERR_PTR / NULL *before* any deref. Previously
++             * the ioq_map_num accounting and map->ioq_idx write happened
++             * first, which would oops if map_userspace() failed (e.g.
++             * get_user_pages_fast returned -EFAULT). See PORTING.md §7.3.
++             */
++            if (IS_ERR_OR_NULL(map))
++            {
++                return IS_ERR(map) ? PTR_ERR(map) : -ENOMEM;
++            }
++
++            if (request.ioq_idx >= 0)
++            {
++                /* Reject overflow *before* bumping the counter so we
++                 * don't leave ioq_map_num in a poisoned state. */
++                if (ctrl->ioq_map_num + 1 > ctrl->ioq_num)
++                {
++                    printk("NVM_MAP_HOST_MEMORY ctrl->ioq_map_num is %d,ctrl->ioq_num is %d\n",
++                           ctrl->ioq_map_num, ctrl->ioq_num);
++                    unmap_and_release(map);
++                    return -EFAULT;
++                }
++                map->ioq_idx = request.ioq_idx;
++                map->is_cq   = request.is_cq;
++                ctrl->ioq_map_num += 1;
++                if (map->is_cq)
++                    ctrl->cq_num++;
++            }
++
++            if (copy_to_user((void __user*) request.ioaddrs, map->addrs,
++                             map->n_addrs * sizeof(uint64_t)))
++            {
++                /* Roll back: we already mutated ctrl state above. */
++                if (request.ioq_idx >= 0) {
++                    if (map->is_cq) ctrl->cq_num--;
++                    ctrl->ioq_map_num -= 1;
++                }
++                unmap_and_release(map);
++                return -EFAULT;
++            }
++            ret = 0;
++            break;
++		} 
++
++		case NVM_MAP_DEVICE_MEMORY: // 将用户态cuda malloc 分配的地址pin住并得到dma地址返回用户态
++		{
++			if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
++			{
++				return -EFAULT;
++			}
++
++			map = map_device_memory(&device_list, ctrl, request.vaddr_start, request.n_pages, &ctrl_list);
++			if (IS_ERR_OR_NULL(map))
++			{
++				return IS_ERR(map) ? PTR_ERR(map) : -ENOMEM;
++			}
++
++			if (copy_to_user((void __user*) request.ioaddrs, map->addrs,
++			                 map->n_addrs * sizeof(uint64_t)))
++			{
++				unmap_and_release(map);
++				return -EFAULT;
++			}
++			ret = 0;
++			break;
++		}
++		case NVM_MAP_DEVICE_QUEUE_MEMORY: // 将用户态cuda malloc 分配的地址pin住并得到dma地址返回用户态
++		{
++			if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
++			{
++				return -EFAULT;
++			}
++
++			/* Queue-ring mappings MUST carry a queue index. Fail fast
++			 * so we don't waste an nvidia_p2p_get_pages() call. */
++			if (request.ioq_idx < 0)
++			{
++				printk("map_device_ioqueue_memory ioq_idx not set yet\n");
++				return -EFAULT;
++			}
++
++			map = map_device_ioqueue_memory(&device_queue_list, ctrl,
++			                                request.vaddr_start, request.n_pages);
++			if (IS_ERR_OR_NULL(map))
++			{
++				return IS_ERR(map) ? PTR_ERR(map) : -ENOMEM;
++			}
++
++			if (ctrl->ioq_map_num + 1 > ctrl->ioq_num)
++			{
++				printk("NVM_MAP_DEVICE_QUEUE_MEMORY ctrl->ioq_map_num is %d,ctrl->ioq_num is %d\n",
++				       ctrl->ioq_map_num, ctrl->ioq_num);
++				unmap_and_release(map);
++				return -EFAULT;
++			}
++			map->ioq_idx = request.ioq_idx;
++			map->is_cq   = request.is_cq;
++			ctrl->ioq_map_num += 1;
++			if (map->is_cq)
++				ctrl->cq_num++;
++
++			if (copy_to_user((void __user*) request.ioaddrs, map->addrs,
++			                 map->n_addrs * sizeof(uint64_t)))
++			{
++				if (map->is_cq) ctrl->cq_num--;
++				ctrl->ioq_map_num -= 1;
++				unmap_and_release(map);
++				return -EFAULT;
++			}
++			ret = 0;
++			break;
++		}
++        case NVM_UNMAP_HOST_MEMORY:
++		{
++            if (copy_from_user(&addr, (void __user*) arg, sizeof(u64)))
++            {
++                return -EFAULT;
++            }
++
++            map = map_find(&host_list, addr);
++            if (map != NULL)
++            {
++				if(map->ioq_idx>=0)
++				{
++					// printk("unmap_userspace map map->ioq_idx is %d, map->is_cq is %d",map->ioq_idx,map->is_cq);
++					if(map->is_cq)
++						ctrl->cq_num--;
++
++					ctrl->ioq_map_num--;
++				}
++                unmap_and_release(map);
++                ret = 0;
++                break;
++            }
++            ret = -EINVAL;
++            printk(KERN_WARNING "NVM_UNMAP_HOST_MEMORY Mapping for address %llx not found\n", addr);
++            break;
++		}
++        case NVM_UNMAP_DEVICE_MEMORY:
++		{
++            if (copy_from_user(&addr, (void __user*) arg, sizeof(u64)))
++            {
++                return -EFAULT;
++            }
++
++            map = map_find(&device_list, addr);
++            if (map != NULL)
++            {
++                unmap_and_release(map);
++				ret = 0;
++                break;
++            }
++            ret = -EINVAL;
++            printk(KERN_WARNING "NVM_UNMAP_DEVICE_MEMORY Mapping for address %llx not found\n", addr);
++            break;
++		}
++        case NVM_UNMAP_DEVICE_QUEUE_MEMORY:
++		{
++            if (copy_from_user(&addr, (void __user*) arg, sizeof(u64)))
++            {
++                return -EFAULT;
++            }
++
++            map = map_find(&device_queue_list, addr);
++            if (map != NULL)
++            {
++				if(map->ioq_idx>=0)
++				{
++					// printk("unmap_userspace map map->ioq_idx is %d, map->is_cq is %d",map->ioq_idx,map->is_cq);
++					if(map->is_cq)
++						ctrl->cq_num--;
++
++					ctrl->ioq_map_num--;
++				}
++                unmap_and_release(map);
++				ret = 0;
++                break;
++            }
++            ret = -EINVAL;
++            printk(KERN_WARNING "NVM_UNMAP_DEVICE_QUEUE_MEMORY Mapping for address %llx not found\n", addr);
++            break;
++		}
++		case NVM_SET_IOQ_NUM:
++		{	
++			printk("NVM_SET_IOQ_NUM 1\n");
++            if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
++            {
++                return -EFAULT;
++            }
++			printk("NVM_SET_IOQ_NUM 2\n");
++			if(request.ioq_idx<=0)
++			{
++				printk("NVM_SET_IOQ_NUM Error 1, has reg %d, reg is %d",ctrl->ioq_num,request.ioq_idx);
++				return -EFAULT;
++			}
++			if(ctrl->ioq_num)
++			{
++				if(request.ioq_idx > ctrl->ioq_num)
++				{
++					printk("NVM_SET_IOQ_NUM Error 2, has reg %d, reg is %d",ctrl->ioq_num,request.ioq_idx);
++					return -EFAULT;
++				}
++			}
++
++
++			ctrl->ioq_num = request.ioq_idx;
++			ctrl->on_host = request.is_cq;
++			ret = 0;
++			break;
++		}
++		case NVM_SET_SHARE_REG:
++		{
++            if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
++            {
++                return -EFAULT;
++            }
++			ctrl->use_sreg = request.ioq_idx;
++			printk("NVM_SET_SHARE_REG ctrl->use_sreg %d",ctrl->use_sreg);
++			ret = 0;
++			break;
++		}
++		case NVM_GET_DEV_INFO:
++		{
++			ndev = pci_get_drvdata(ctrl->pdev);
++			if(ndev == NULL)
++			{
++				printk(" pci_get_drvdata error\n");
++				return -EFAULT;
++			}
++			ns = snvme_find_get_ns(&ndev->ctrl,1);
++			if(ns == NULL)
++			{	
++				printk(" s_snvme_find_get_ns error\n");
++				return -EFAULT;
++			}
++			printk("ns disk info: seq %lld, name %s", ns->disk->diskseq, ns->disk->disk_name);
++			
++			memcpy(drequest.disk_name, ns->disk->disk_name, DISK_NAME_LEN * sizeof(char));
++			drequest.start_cq_idx = ndev->user_start_qid;
++			drequest.dstrd        = ndev->db_stride;
++			drequest.nr_user_q    = ndev->nr_user_use_cq;
++			drequest.block_size   = 1 << ns->lba_shift;
++			drequest.max_data_size= ndev->ctrl.max_hw_sectors;
++			if (ns)
++				snvme_put_ns(ns);
++
++			if (copy_to_user((void __user*) arg, &drequest, sizeof(struct nvm_ioctl_dev)))
++			{
++				return -EFAULT;
++			}
++			
++			ret = 0;
++			break;
++		}
++		case NVM_CLEAR_IOQ_NUM:
++		{
++			ctrl->ioq_map_num = 0;
++			ctrl->cq_num      = 0;
++			printk("NVM_CLEAR_IOQ_NUM \n");
++			ret = 0;
++			break;
++		}
++        default:
++            printk(KERN_NOTICE "Unknown ioctl command from process %d: %u\n",
++                    current->pid, cmd);
++            ret = -EINVAL;
++            break;
++    }
++
++    return ret;
++}
++static int svm_mmap_registers(struct file* file, struct vm_area_struct* vma)
++{
++	struct ctrl* ctrl = NULL;
++    ctrl = ctrl_find_by_inode(&ctrl_list, file->f_inode);
++    if (ctrl == NULL || ctrl->pdev == NULL)
++    {
++        printk(KERN_CRIT "Unknown controller reference svm_mmap_registers\n");
++        return -EBADF;
++    }
++
++    if (vma->vm_end - vma->vm_start > pci_resource_len(ctrl->pdev, 0))
++    {
++        printk(KERN_WARNING "Invalid range size\n");
++        return -EINVAL;
++    }
++	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
++	return vm_iomap_memory(vma, pci_resource_start(ctrl->pdev, 0), vma->vm_end - vma->vm_start);
++
++}
++
++/* Define file operations for device file */
++static const struct file_operations snvm_dev_fops = 
++{
++    .owner = THIS_MODULE,
++    .unlocked_ioctl = snvm_dev_map_ioctl,
++    .mmap = svm_mmap_registers,
++};
++
++static int snvm_chrdev_create(struct pci_dev *pdev, unsigned int class){
++	struct ctrl* ctrl = NULL;
++	int minor, err;
++	if (pdev->class != class) {
++		printk("unexpected pci class mismatch, abort path find!\n");
++		return -1;
++	}
++	minor = ida_simple_get(&snvm_chrdev_minor_ida, 0, 0, GFP_KERNEL);
++	if (minor < 0)
++		return minor;
++
++	ctrl = ctrl_get(&ctrl_list, dev_class, pdev, minor);
++	if (IS_ERR(ctrl)) {
++		return PTR_ERR(ctrl);
++	}
++	err = ctrl_chrdev_create(ctrl, dev_first, &snvm_dev_fops);
++	if (err != 0){
++		/* Same tear-down ordering rule as snvm_chrdev_helper(!create):
++		 * release the ctrl (which unwinds whatever ctrl_chrdev_create
++		 * partially built) before returning the minor to the IDA pool. */
++		ctrl_put(ctrl);
++		ida_simple_remove(&snvm_chrdev_minor_ida, minor);
++		return err;
++	}
++
++	return 0;
++}
++
++static unsigned long clear_ctrl_list(struct list* list)
++{
++    unsigned long i = 0;
++    struct list_node* ptr = list_next(&list->head);
++    struct ctrl* ctrl;
++
++    while (ptr != NULL)
++    {
++        ctrl = container_of(ptr, struct ctrl, list);
++		ctrl_put(ctrl);
++        ++i;
++
++        ptr = list_next(&list->head);
++    }
++
++    return i;
++}
++
++static unsigned long clear_map_list(struct list* list)
++{
++    unsigned long i = 0;
++    struct list_node* ptr = list_next(&list->head);
++    struct map* map;
++
++    while (ptr != NULL)
++    {
++        map = container_of(ptr, struct map, list);
++        unmap_and_release(map);
++        ++i;
++
++        ptr = list_next(&list->head);
++    }
++
++    return i;
++}
++
++static struct pci_driver snvme_driver = {
++	.name		= PCI_DRIVER_NAME,
+ 	.id_table	= nvme_id_table,
+ 	.probe		= nvme_probe,
+ 	.remove		= nvme_remove,
+@@ -3392,24 +4074,354 @@
+ 	.err_handler	= &nvme_err_handler,
+ };
+ 
+-static int __init nvme_init(void)
++static int snvm_register_driver(void)
+ {
+ 	BUILD_BUG_ON(sizeof(struct nvme_create_cq) != 64);
+ 	BUILD_BUG_ON(sizeof(struct nvme_create_sq) != 64);
+ 	BUILD_BUG_ON(sizeof(struct nvme_delete_queue) != 64);
+ 	BUILD_BUG_ON(IRQ_AFFINITY_MAX_SETS < 2);
++	nvme_num = 0;
++	gpu_num = 0;
++	// nvfs_fill_gpu2peer_distance_table_once();
++	
++	return pci_register_driver(&snvme_driver);
++}
++
++static void snvm_unregister_driver(void)
++{
++	pci_unregister_driver(&snvme_driver);
++	flush_workqueue(s_nvme_wq);
++}
++
++static int register_driver(void){
++	struct device_driver *dev_drv;
++	int ret = 0;
++
++	mutex_lock(&snvm_control_lock);
++	dev_drv = driver_find(PCI_DRIVER_NAME, &pci_bus_type);
++	if (!dev_drv && !snvm_registered){
++		ret = snvm_register_driver();
++		if (ret){
++			printk("snvm register driver error\n");
++		}else{
++			snvm_registered = 1;
++		}
++	}
++	mutex_unlock(&snvm_control_lock);
++	return ret;
++}
++
++static int clean_driver(void){
++	struct device_driver *dev_drv;
++	unsigned long remaining = 0;
++
++	//clear device mem map
++	remaining = clear_map_list(&device_list);
++	if (remaining){
++		printk(KERN_NOTICE "%lu GPU memory mappings were still in use on unload\n", remaining);
++	}
++
++	//clear device io queue map
++	remaining = clear_map_list(&device_queue_list);
++	if (remaining){
++		printk(KERN_NOTICE "%lu GPU memory mappings were still in use on unload\n", remaining);
++	}
++
++	remaining = clear_map_list(&host_list);
++	if (remaining){
++		printk(KERN_NOTICE "%lu host memory mappings were still in use on unload\n", remaining);
++	}
++
++	mutex_lock(&snvm_control_lock);
++	dev_drv = driver_find(PCI_DRIVER_NAME, &pci_bus_type);
++	if (dev_drv){
++		snvm_unregister_driver();
++	}
++	mutex_unlock(&snvm_control_lock);
++	return 0;
++}
++
++static int snvm_rebind_driver(struct pci_device_addr dev_addr){
++	struct device_driver *dev_drv;
++	struct pci_dev *pdev;
++	int ret = 0;
+ 
+-	return pci_register_driver(&nvme_driver);
++	pdev = TO_PCI_DEV(dev_addr);
++
++	if (!pdev) {
++		printk("pci_get_domain_bus_and_slot failed\n");
++		return -ENODEV;
++	}
++	// fixme
++	dev_drv = pdev->dev.driver;
++	if (dev_drv && dev_drv->name) { // whatever driver is binded to aviod automatic binding
++		if (pci_is_enabled(pdev)){
++			pci_disable_device(pdev);
++			printk("(%s): disable device for bind new driver\n", __func__);
++		}
++		device_release_driver(&pdev->dev);
++	}
++
++	printk("start to bind nvme device to snvme: pci %x:%x:%x.%x\n",
++														dev_addr.domain,
++														dev_addr.bus, 
++														dev_addr.slot, 
++														dev_addr.func);
++
++	// fixme: wait for new driver binding
++
++	if (register_driver()){
++		printk("register driver error\n");
++		pci_dev_put(pdev);
++		return -EFAULT;
++	}
++
++	// double check to avoid driver automatic binding
++	dev_drv = pdev->dev.driver;
++	if (dev_drv){
++		printk("device driver name: %s\n", dev_drv->name);
++	}
++	if (!dev_drv){
++		ret = device_driver_attach(&snvme_driver.driver, &pdev->dev);
++		if (ret){
++			printk("%s: device driver attach %d", __func__, ret);
++		}
++	}
++	pci_dev_put(pdev);
++	return ret;
+ }
+ 
++static int snvm_unbind_driver(struct pci_device_addr dev_addr){
++	struct device_driver *dev_drv;
++	struct pci_dev *pdev;
++
++	pdev = TO_PCI_DEV(dev_addr);
++	if (!pdev) {
++		printk("(%s): pci_get_domain_bus_and_slot failed\n", __func__);
++		return -EFAULT;
++	}
++
++	dev_drv = pdev->dev.driver;
++	if (!dev_drv){
++		printk("(%s): device do not have driver\n", __func__);
++		return -EFAULT;
++	}
++
++	if (!dev_drv->name || strcmp(dev_drv->name, PCI_DRIVER_NAME) != 0){
++		printk("(%s): device's driver is not %s\n", __func__, PCI_DRIVER_NAME);
++		return -EFAULT;
++	}
++
++	if (pci_is_enabled(pdev)){
++		pci_disable_device(pdev);
++		printk("(%s): disable device for unbind driver\n", __func__);
++	}
++	pr_info("Unbinding device from driver %s\n", pdev->driver->name);
++	device_release_driver(&pdev->dev);
++	pci_dev_put(pdev);
++	return 0;
++}
++
++
++static int snvm_chrdev_helper(struct pci_device_addr* dev_addr, int create){
++	struct pci_device_addr pdev_addr;
++	struct pci_dev *pdev;
++	struct ctrl* ctrl;
++
++	int ret = -EFAULT;
++
++	pdev_addr = *dev_addr;
++	pdev = TO_PCI_DEV(pdev_addr);
++	if (!pdev){
++		printk("(%s): pci_get_domain_bus_and_slot failed\n", __func__);
++		return -EFAULT;
++	}
++
++	ctrl = ctrl_find_by_pci_dev(&ctrl_list, pdev);
++	if (create && !ctrl){ // create and chrdev has not been created
++		ret = snvm_chrdev_create(pdev,PCI_CLASS_STORAGE_EXPRESS);
++		if (!ret){
++			ctrl = ctrl_find_by_pci_dev(&ctrl_list, pdev); // ctrl has been created by default
++			memset(dev_addr, 0, sizeof(struct pci_device_addr));
++			dev_addr->domain = ctrl->number;
++		}
++	}else if(!create && ctrl){ // remove and chrdev has not been removed
++		/*
++		 * Tear down order matters: ctrl_put() calls ctrl_chrdev_remove()
++		 * which device_destroy()/cdev_del() uses ctrl->number to build
++		 * MKDEV(). If we return the minor to the IDA pool *first*, a
++		 * concurrent SNVM_CHRDEV_CREATE could pick up the same minor
++		 * and race device_create() against our still-live cdev. Put
++		 * first, then free the minor.
++		 */
++		int released_minor = ctrl->number;
++		ctrl_put(ctrl);
++		ida_simple_remove(&snvm_chrdev_minor_ida, released_minor);
++		ret = 0;
++	}
++
++	pci_dev_put(pdev);
++	return ret;
++}
++
++static long snvm_ioctl(struct file *file, unsigned int cmd,
++			      unsigned long arg)
++{
++	struct pci_device_addr dev_addr;
++	void __user *argp = (void __user *)arg;
++	int ret;
++
++	if (copy_from_user(&dev_addr, argp, sizeof(dev_addr))){
++		printk("(%s): copy from user error\n", __func__);
++		return -EFAULT;
++	}
++
++	switch (cmd){
++		case SNVM_DEVICE_BIND:
++			return snvm_rebind_driver(dev_addr);
++		case SNVM_DEVICE_UNBIND:
++			return snvm_unbind_driver(dev_addr);
++		case SNVM_CHRDEV_CREATE:
++			ret = snvm_chrdev_helper(&dev_addr, 1);
++			if (!ret){
++				ret = copy_to_user(argp, &dev_addr, sizeof(dev_addr));
++			}
++			return ret;
++		case SNVM_CHRDEV_REMOVE:
++			return snvm_chrdev_helper(&dev_addr, 0);
++		default:
++			return -ENOTTY;
++	}
++}
++
++static const struct file_operations snvm_fops = {
++	.owner	 = THIS_MODULE,
++	.unlocked_ioctl	= snvm_ioctl,
++};
++
++static char *get_snvme_mode(struct device *dev, umode_t *mode) {
++    if (mode) *mode = 0666;
++    return NULL;
++}
++
++static int snvm_cdev_init(void)
++{
++	int ret;
++	struct device *device;
++
++    mutex_init(&snvm_control_lock);
++
++	dev_class = class_create(THIS_MODULE, DRIVER_NAME);
++	if (IS_ERR(dev_class)) {
++		ret = PTR_ERR(dev_class);
++		pr_err("failed to create class: %d\n", ret);
++		return ret;
++	}
++
++	dev_class->devnode = get_snvme_mode;
++	ret = alloc_chrdev_region(&dev_first, 0, max_num_ctrls, DRIVER_NAME);
++	if (ret < 0) {
++		pr_err("failed to allocate device numbers: %d\n", ret);
++		goto destroy_subsys_class;
++	}
++
++	snvm_devno =  MKDEV(MAJOR(dev_first), max_num_ctrls); 
++	cdev_init(&snvm_cdev, &snvm_fops);
++	snvm_cdev.owner = THIS_MODULE;
++    ret = cdev_add(&snvm_cdev, snvm_devno, 1);  
++    if (ret < 0) {  
++        pr_err("failed to add cdev : %d\n", ret);
++    	goto err_unregister_chrdev;  
++    }  
++
++	// 创建设备文件 
++	device = device_create(dev_class, NULL, snvm_devno, NULL, "snvm_control"); 
++	if (IS_ERR(device)) {	
++		ret = PTR_ERR(device);
++		pr_err("failed to create device_create: %d\n", ret);
++		goto destroy_cdev;
++	}
++	return 0;
++
++destroy_cdev:
++	cdev_del(&snvm_cdev);
++err_unregister_chrdev:
++	unregister_chrdev_region(dev_first, max_num_ctrls);
++destroy_subsys_class:
++	class_destroy(dev_class);
++	return ret;
++}
++
++static void snvm_cdev_release(void)
++{
++	device_destroy(dev_class,snvm_devno);
++	cdev_del(&snvm_cdev);
++	unregister_chrdev_region(dev_first, max_num_ctrls);
++	class_destroy(dev_class);
++    mutex_destroy(&snvm_control_lock);
++	ida_destroy(&snvm_chrdev_minor_ida);
++	printk("snvme_helpers_cdev_release success!\n");
++}
++
++
++static int __init nvme_init(void)
++{
++    int ret;
++    snvm_registered = 0;
++	if(nvfs_nvidia_p2p_init()) {
++		printk("Could not load nvidia_p2p* symbols\n");
++		ret = -EOPNOTSUPP;
++		return ret;
++	}
++    list_init(&ctrl_list);
++    list_init(&host_list);
++    list_init(&device_list);
++	list_init(&device_queue_list);
++    // Set up character device creation
++    ret = snvm_cdev_init();
++	if(ret)
++		return ret;
++    return 0;
++}
++
++
+ static void __exit nvme_exit(void)
+ {
+-	pci_unregister_driver(&nvme_driver);
+-	flush_workqueue(nvme_wq);
++	int ret;
++    unsigned long remaining = 0;
++
++
++	//clear device mem map
++    remaining = clear_map_list(&device_list);
++    if (remaining != 0)
++    {
++        printk(KERN_NOTICE "%lu GPU memory mappings were still in use on unload\n", remaining);
++    }
++	//clear device io queue map
++    remaining = clear_map_list(&device_queue_list);
++    if (remaining != 0)
++    {
++        printk(KERN_NOTICE "%lu GPU memory mappings were still in use on unload\n", remaining);
++    }
++
++    remaining = clear_map_list(&host_list);
++    if (remaining != 0)
++    {
++        printk(KERN_NOTICE "%lu host memory mappings were still in use on unload\n", remaining);
++    }
++
++	clean_driver();
++
++	nvfs_nvidia_p2p_exit();
++	ret = clear_ctrl_list(&ctrl_list);
++	if(ret!=curr_ctrls)
++		printk("release ctrl error!, cur is %d, release %d",curr_ctrls,ret);
++    snvm_cdev_release();
++
+ }
+ 
+-MODULE_AUTHOR("Matthew Wilcox <willy@linux.intel.com>");
++MODULE_AUTHOR("Shi Qiu <qiushijsxs@stu.xmu.edu.cn>");
+ MODULE_LICENSE("GPL");
+ MODULE_VERSION("1.0");
+ module_init(nvme_init);
+-module_exit(nvme_exit);
++module_exit(nvme_exit);
+\ No newline at end of file

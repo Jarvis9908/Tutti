@@ -20,10 +20,6 @@
 #                            data integrity LBA-by-LBA on the live disk.
 #                            Always built; BINDS AND WRITES TO LBA
 #                            (destructive -- target disk must be empty).
-#   snvme_ubind           -- owner-side reset helper: SNVM_DEVICE_UNBIND +
-#                            SNVM_CHRDEV_REMOVE for one BDF.  Always built;
-#                            recovers a controller left half-bound by a
-#                            failed smoke run (non-destructive to data).
 #
 # All binaries depend on nothing but the SNVMe UAPI header
 #   ../../nvme/libnvm/include/ioctl.h
@@ -38,7 +34,6 @@
 #   sudo ./snvme_smoke_qgroup 0000:50:00.0         # queue-group lifecycle (safe, no bind)
 #   sudo ./snvme_smoke_addq 0000:50:00.0           # B3 ADD_USER_QUEUE (destructive: binds)
 #   sudo ./snvme_smoke_io 0000:50:00.0             # B3 + IO round-trip (destructive: writes LBA)
-#   sudo ./snvme_ubind 0000:50:00.0                # reset a half-bound controller (safe)
 #
 # Override knobs:
 #   CC, CFLAGS, NVCC, NVCCFLAGS, CUDA_ARCH
@@ -60,7 +55,6 @@ TARGET_RECYCLE  := snvme_smoke_recycle
 TARGET_QGROUP   := snvme_smoke_qgroup
 TARGET_ADDQ     := snvme_smoke_addq
 TARGET_IO       := snvme_smoke_io
-TARGET_UBIND    := snvme_ubind
 
 UAPI_INC := ../../nvme/libnvm/include
 
@@ -96,17 +90,16 @@ SRC_RECYCLE := snvme_smoke_recycle.c
 SRC_QGROUP  := snvme_smoke_qgroup.c
 SRC_ADDQ    := snvme_smoke_addq.c
 SRC_IO      := snvme_smoke_io.c
-SRC_UBIND   := snvme_ubind.c
 
 # Build the GPU test only if nvcc is available.
 HAVE_NVCC := $(shell command -v $(NVCC) >/dev/null 2>&1 && echo yes || echo no)
 
-.PHONY: all clean run run-gpu run-recycle run-qgroup run-addq run-io run-ubind
+.PHONY: all clean run run-gpu run-recycle run-qgroup run-addq run-io
 
 ifeq ($(HAVE_NVCC),yes)
-all: $(TARGET) $(TARGET_GPU) $(TARGET_RECYCLE) $(TARGET_QGROUP) $(TARGET_ADDQ) $(TARGET_IO) $(TARGET_UBIND)
+all: $(TARGET) $(TARGET_GPU) $(TARGET_RECYCLE) $(TARGET_QGROUP) $(TARGET_ADDQ) $(TARGET_IO)
 else
-all: $(TARGET) $(TARGET_RECYCLE) $(TARGET_QGROUP) $(TARGET_ADDQ) $(TARGET_IO) $(TARGET_UBIND)
+all: $(TARGET) $(TARGET_RECYCLE) $(TARGET_QGROUP) $(TARGET_ADDQ) $(TARGET_IO)
 	@echo "[i] nvcc not found; skipping $(TARGET_GPU)."
 	@echo "    Install CUDA Toolkit (or set NVCC=...) and re-run make to enable it."
 endif
@@ -130,11 +123,8 @@ $(TARGET_ADDQ): $(SRC_ADDQ)
 $(TARGET_IO): $(SRC_IO)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-$(TARGET_UBIND): $(SRC_UBIND)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
-
 clean:
-	rm -f $(TARGET) $(TARGET_GPU) $(TARGET_RECYCLE) $(TARGET_QGROUP) $(TARGET_ADDQ) $(TARGET_IO) $(TARGET_UBIND)
+	rm -f $(TARGET) $(TARGET_GPU) $(TARGET_RECYCLE) $(TARGET_QGROUP) $(TARGET_ADDQ) $(TARGET_IO)
 
 # Convenience: PCI=0000:50:00.0 make run [BIND=1]
 run: $(TARGET)
@@ -191,12 +181,3 @@ run-io: $(TARGET_IO)
 	    echo "usage: PCI=DDDD:BB:DD.F make run-io"; exit 1; \
 	fi; \
 	sudo ./$(TARGET_IO) $(PCI)
-
-# Convenience: PCI=0000:50:00.0 make run-ubind
-# (owner-side reset: SNVM_DEVICE_UNBIND + SNVM_CHRDEV_REMOVE; best-effort,
-#  safe to run on a controller in any partial bind state.)
-run-ubind: $(TARGET_UBIND)
-	@if [ -z "$(PCI)" ]; then \
-	    echo "usage: PCI=DDDD:BB:DD.F make run-ubind"; exit 1; \
-	fi; \
-	sudo ./$(TARGET_UBIND) $(PCI)

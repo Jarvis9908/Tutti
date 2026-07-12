@@ -120,6 +120,7 @@ NvmeServiceClient::connect(int32_t device_id,
     sess->blk_size               = resp.blk_size();
     sess->blk_size_log           = resp.blk_size_log();
     sess->queue_depth            = resp.queue_depth();
+    sess->max_data_size          = resp.max_data_size();
     sess->mount_path             = resp.mount_path();
     sess->heartbeat_interval_sec = resp.heartbeat_interval_sec();
     sess->lease_timeout_sec      = resp.lease_timeout_sec();

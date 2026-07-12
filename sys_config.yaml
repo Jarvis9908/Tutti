@@ -72,18 +72,13 @@ gpus:
 #                   omitted).
 # ---------------------------------------------------------------------------
 nvmes:
-  - pci_addr: "0000:4b:00.0"      # NVMe #0 (first of three)
+  - pci_addr: "0000:08:00.0"      # NVMe #0 -> daemon device_id=0
     mount_path: "/mnt/nvme1"
     namespace_id: 1
     kernel_ioq_cap: 32
     allowed_gpus: [0]
-  - pci_addr: "0000:57:00.0"      # NVMe #1
+  - pci_addr: "0000:4b:00.0"      # NVMe #1 -> daemon device_id=1
     mount_path: "/mnt/nvme2"
-    namespace_id: 1
-    kernel_ioq_cap: 32
-    allowed_gpus: [0]
-  - pci_addr: "0000:63:00.0"      # NVMe #2
-    mount_path: "/mnt/nvme3"
     namespace_id: 1
     kernel_ioq_cap: 32
     allowed_gpus: [0]

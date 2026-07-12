@@ -65,6 +65,7 @@ grpc::Status NvmeServiceImpl::Connect(grpc::ServerContext* /*ctx*/,
     response->set_blk_size_log(g.blk_size_log);
     response->set_queue_depth(g.queue_depth);
     response->set_dstrd(g.dstrd);
+    response->set_max_data_size(g.max_data_size);
     response->set_heartbeat_interval_sec(g.heartbeat_interval_sec);
     response->set_lease_timeout_sec(g.lease_timeout_sec);
     response->set_mount_path(g.mount_path);

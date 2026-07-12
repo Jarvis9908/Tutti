@@ -26,22 +26,22 @@ find_package(PkgConfig)
 #   部分发行版（如 TencentOS/RHEL 自带的 yaml-cpp、libtorch 内嵌依赖等）
 #   仅为 Release / Debug 提供 IMPORTED_LOCATION，不含 RelWithDebInfo / MinSizeRel。
 #   不设置该映射时，CMake 会对每个链接到此 target 的目标都警告一次（CMP0111）。
-#   下面让这两种构建类型自动回退到 Release，消除刷屏告警。
-set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO RelWithDebInfo Release "")
-set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL     MinSizeRel     Release "")
+#   下面让这两种构建类型依次尝试自动回退到 Release / NOCONFIG / 无后缀，消除刷屏告警。
+set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO RelWithDebInfo Release NOCONFIG "")
+set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL     MinSizeRel     Release NOCONFIG "")
 
 find_package(yaml-cpp REQUIRED)
 # 兼容不同 yaml-cpp 包的 target 命名：
 #   vcpkg / 新版 upstream : yaml-cpp::yaml-cpp
 #   老的系统包（0.5.x）   : yaml-cpp (裸名 target) 或仅提供 ${YAML_CPP_LIBRARIES}
 if (TARGET yaml-cpp::yaml-cpp)
-    set(GEMINIFS_YAML_CPP_TARGET yaml-cpp::yaml-cpp)
+    set(TUTTI_YAML_CPP_TARGET yaml-cpp::yaml-cpp)
 elseif (TARGET yaml-cpp)
-    set(GEMINIFS_YAML_CPP_TARGET yaml-cpp)
+    set(TUTTI_YAML_CPP_TARGET yaml-cpp)
 else ()
-    set(GEMINIFS_YAML_CPP_TARGET ${YAML_CPP_LIBRARIES})
+    set(TUTTI_YAML_CPP_TARGET ${YAML_CPP_LIBRARIES})
 endif ()
-message(STATUS "yaml-cpp target: ${GEMINIFS_YAML_CPP_TARGET}")
+message(STATUS "yaml-cpp target: ${TUTTI_YAML_CPP_TARGET}")
 
 pkg_check_modules(UNWIND REQUIRED libunwind)
 
@@ -72,8 +72,8 @@ message(STATUS "Using CUDA ${CMAKE_CUDA_COMPILER_VERSION}")
 # every `#include <cuda/atomic>` chain breaks at preprocess time.
 #
 # We add it as a *global* include dir because libnvm's headers are
-# distributed across multiple targets (libnvm itself, libgeminifs,
-# nvmeservice, device_manager, io_engine), and every C++ TU that
+# distributed across multiple targets (libnvm itself, nvmeservice,
+# device_manager, io_engine), and every C++ TU that
 # transitively pulls libnvm's nvm_types.h needs the same resolution.
 #
 # Pre-CUDA-13 toolkits do not have this directory; the if(EXISTS ...)
@@ -233,57 +233,28 @@ if (NOT _snvme_tags)
     message (FATAL_ERROR "在 ${snvme_root_dir} 下未找到任何带 Makefile.in 的 snvme-* baseline 目录。")
 endif ()
 
-# 没显式指定则按 uname -r 自动匹配
-#
-# 匹配策略（按优先级从高到低）：
-#   1) 完全相等：tag == uname -r
-#   2) tag 是 uname -r 的前缀（tag 更短，例如 tag=5.4.241-1-tlinux4-0017，uname=5.4.241-1-tlinux4-0017.x86_64）
-#   3) 把 tag 拆出"纯版本号部分"（首段连续的 [0-9.]+），若该版本号是 uname -r 的前缀，则视为匹配
-#      （例如 tag=5.15.0-public，提取出 5.15.0；uname=5.15.0 → 命中）
-# 多个候选时取"匹配长度最长"的 tag。
+# 没显式指定则按 uname -r 前缀匹配
 if (NOT SNVME_KERNEL_VERSION)
     execute_process (COMMAND uname -r
         OUTPUT_VARIABLE _uname_r OUTPUT_STRIP_TRAILING_WHITESPACE)
     message (STATUS "Detected running kernel: ${_uname_r}")
     set (_best_tag "")
-    set (_best_score 0)
+    set (_best_len 0)
     foreach (_tag IN LISTS _snvme_tags)
-        set (_score 0)
-        # 1) 完全相等
-        if ("${_tag}" STREQUAL "${_uname_r}")
-            set (_score 1000)
-        else ()
-            string (LENGTH "${_tag}"     _tlen)
-            string (LENGTH "${_uname_r}" _ulen)
-            # 2) tag 是 uname -r 的前缀
-            if (_tlen LESS_EQUAL _ulen)
-                string (SUBSTRING "${_uname_r}" 0 ${_tlen} _u_prefix)
-                if ("${_u_prefix}" STREQUAL "${_tag}")
-                    set (_score ${_tlen})  # 取 tag 长度作为分数
-                endif ()
+        string (LENGTH "${_tag}" _tlen)
+        string (LENGTH "${_uname_r}" _ulen)
+        # 取 uname-r 中长度等于 _tlen 的前缀来比较
+        if (_tlen LESS_EQUAL _ulen)
+            string (SUBSTRING "${_uname_r}" 0 ${_tlen} _u_prefix)
+            if ("${_u_prefix}" STREQUAL "${_tag}" AND _tlen GREATER _best_len)
+                set (_best_tag "${_tag}")
+                set (_best_len "${_tlen}")
             endif ()
-            # 3) tag 的"纯版本号部分"是 uname -r 的前缀
-            if (_score EQUAL 0)
-                string (REGEX MATCH "^[0-9]+(\\.[0-9]+)*" _tag_ver "${_tag}")
-                if (_tag_ver)
-                    string (LENGTH "${_tag_ver}" _vlen)
-                    if (_vlen LESS_EQUAL _ulen)
-                        string (SUBSTRING "${_uname_r}" 0 ${_vlen} _u_prefix2)
-                        if ("${_u_prefix2}" STREQUAL "${_tag_ver}")
-                            set (_score ${_vlen})
-                        endif ()
-                    endif ()
-                endif ()
-            endif ()
-        endif ()
-        if (_score GREATER _best_score)
-            set (_best_tag "${_tag}")
-            set (_best_score "${_score}")
         endif ()
     endforeach ()
     if (_best_tag)
         set (SNVME_KERNEL_VERSION "${_best_tag}")
-        message (STATUS "Auto-selected snvme baseline by uname -r match: ${SNVME_KERNEL_VERSION} (score=${_best_score})")
+        message (STATUS "Auto-selected snvme baseline by uname -r match: ${SNVME_KERNEL_VERSION}")
     else ()
         message (FATAL_ERROR
             "无法为当前 kernel '${_uname_r}' 自动匹配 snvme baseline。\n"
@@ -380,10 +351,8 @@ install (TARGETS libnvm DESTINATION "lib")
 # ---------------------------------------------------------------------------
 add_subdirectory(memory)
 
-# legacy filesystems/ext4/libgeminifs/ is intentionally NOT added here.
-# The directory is preserved on disk as a logic-reference snapshot
-# during the L1 5b refactor and will be deleted once the new layers
-# fully replace it.
+# The legacy monolithic GPU-file tree has been moved out of
+# the repository (kept as an external backup); nothing here references it.
 
 # NVMeService
 set (nvmeservice_root "${PROJECT_SOURCE_DIR}/backends/local/NVMeService")
@@ -416,9 +385,9 @@ message(STATUS "Found gRPC: target gRPC::grpc++ ready")
 
 # protoc 可执行文件：优先使用 imported target（modern protobuf-config 提供）
 if (TARGET protobuf::protoc)
-    set(GEMINIFS_PROTOC_EXECUTABLE "$<TARGET_FILE:protobuf::protoc>")
+    set(TUTTI_PROTOC_EXECUTABLE "$<TARGET_FILE:protobuf::protoc>")
 elseif (Protobuf_PROTOC_EXECUTABLE)
-    set(GEMINIFS_PROTOC_EXECUTABLE "${Protobuf_PROTOC_EXECUTABLE}")
+    set(TUTTI_PROTOC_EXECUTABLE "${Protobuf_PROTOC_EXECUTABLE}")
 else ()
     message(FATAL_ERROR "protoc not found. Please ensure protobuf is properly installed.")
 endif ()
@@ -430,7 +399,7 @@ add_custom_command(
            "${CMAKE_CURRENT_BINARY_DIR}/nvmeservice.pb.h"
            "${CMAKE_CURRENT_BINARY_DIR}/nvmeservice.grpc.pb.cc"
            "${CMAKE_CURRENT_BINARY_DIR}/nvmeservice.grpc.pb.h"
-    COMMAND "${GEMINIFS_PROTOC_EXECUTABLE}"
+    COMMAND "${TUTTI_PROTOC_EXECUTABLE}"
     ARGS --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
          --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
          -I "${nvmeservice_root}/src"
@@ -458,7 +427,7 @@ else ()
     target_link_libraries(nvmeservice PUBLIC gRPC::grpc++ ${Protobuf_LIBRARIES})
     target_include_directories(nvmeservice PUBLIC ${Protobuf_INCLUDE_DIRS})
 endif ()
-target_link_libraries(nvmeservice PRIVATE ${GEMINIFS_YAML_CPP_TARGET})
+target_link_libraries(nvmeservice PRIVATE ${TUTTI_YAML_CPP_TARGET})
 set_target_properties(nvmeservice PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 set_target_properties(nvmeservice PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 set_target_properties(nvmeservice PROPERTIES OUTPUT_NAME "nvmeservice")
@@ -478,6 +447,30 @@ add_subdirectory(nvme_storage)
 # nvme_storage.  R6.1 ships the interface + a pure resolve helper as a
 # header-only INTERFACE library; R6.2/R6.3 will add the impl.
 add_subdirectory(block_storage)
+
+# io_engine layers batch IO orchestration on top of memory + block_storage
+# + nvme_storage.  R8.1 ships the host-side batch builder + a CPU-only
+# smoke (build & validate, no kernel).  R8.2 adds the GPU kernel.
+add_subdirectory(io_engine)
+
+# coordinator/ is the top-level orchestrator (R9): one Coordinator owns
+# the registry -> nvme_storage -> block_storage -> memory -> io_engine
+# chain and exposes high-level bootstrap / create_gpu_file /
+# register_tensor / submit_batch.  Must be added AFTER all the layers
+# it links against.
+add_subdirectory(coordinator)
+
+# adapters/ holds framework-facing integration layers that compose the
+# core runtime without polluting it.  kv_cache reconstructs the legacy
+# GeminiFS per-layer K/V offset + auto-chunking semantics on top of the
+# generic io_engine (Roadmap.md "Adapter Layer").  Added after the
+# coordinator it links against, before the examples that exercise it.
+add_subdirectory(adapters/kv_cache)
+
+# examples/ holds the end-to-end smokes (R9).  e2e_smoke drives the
+# whole stack through the Coordinator.  Added last so every layer +
+# the coordinator target is already declared.
+add_subdirectory(examples)
 
 
 # Macro for creating sample target
@@ -510,8 +503,7 @@ macro (make_benchmark target binary_name files)
         cuda_add_executable (${target}) # Ugly bugly
         target_sources (${target} PRIVATE ${files})
 
-        add_dependencies (${target} libgeminifs)
-        target_link_libraries (${target}  libnvm libgeminifs CUDA::cudart)
+        target_link_libraries (${target}  libnvm CUDA::cudart)
         set_target_properties (${target} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
         set_target_properties (${target} PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
         set_target_properties (${target} PROPERTIES OUTPUT_NAME "nvm-${binary_name}")

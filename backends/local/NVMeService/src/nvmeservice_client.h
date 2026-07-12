@@ -100,6 +100,11 @@ public:
         uint32_t    blk_size_log  = 0;
         uint32_t    queue_depth   = 0;
 
+        // CTRL.MDTS in bytes (per-IO transfer cap).  The daemon read
+        // this from NVM_GET_DEV_INFO; clients can't (attach_client
+        // skips GET_DEV_INFO), so it arrives via RPC.
+        uint64_t    max_data_size = 0;
+
         // GPU-view symlink path the daemon installed for
         // (cuda_device, NVMe).  Empty if symlink install failed.
         std::string mount_path;

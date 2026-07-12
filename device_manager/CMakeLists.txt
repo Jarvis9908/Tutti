@@ -28,7 +28,7 @@ add_library(tutti_device_manager ${TUTTI_DEVICE_MANAGER_SOURCES})
 target_include_directories(tutti_device_manager
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/runtime/include"          # for runtime/device.h
+        "${PROJECT_SOURCE_DIR}/coordinator/include"          # for coordinator/device.h
         "${PROJECT_SOURCE_DIR}/io_engine/include"        # for backend_type.h, capability_set.h
     PRIVATE
         "${PROJECT_SOURCE_DIR}/backends/local/nvme/libnvm/include"
@@ -52,29 +52,8 @@ set_target_properties(tutti_device_manager PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
-# ---------------------------------------------------------------------------
-# Smoke test
-# ---------------------------------------------------------------------------
-
-add_executable(registry_smoke
-    test/registry_smoke.cu
-)
-
-target_link_libraries(registry_smoke
-    PRIVATE
-        tutti_device_manager
-        libnvm
-        CUDA::cudart
-)
-
-set_target_properties(registry_smoke PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    BUILD_RPATH   "$ORIGIN/../lib"
-    INSTALL_RPATH "$ORIGIN/../lib"
-)
+# Smoke tests live in the top-level examples/ tree (R9.4).
 
 install(TARGETS tutti_device_manager DESTINATION "lib")
-install(TARGETS registry_smoke       DESTINATION "bin")
 install(DIRECTORY include/ DESTINATION "include/tutti/device_manager"
         FILES_MATCHING PATTERN "*.h" PATTERN "*.cuh")
