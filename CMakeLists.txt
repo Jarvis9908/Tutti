@@ -23,7 +23,7 @@ find_package(CUDAToolkit 12.6 REQUIRED)
 find_package(PkgConfig)
 
 # Imported-target configuration fallback：
-#   部分发行版（如 TencentOS/RHEL 自带的 yaml-cpp、libtorch 内嵌依赖等）
+#   部分发行版（如 TencentOS/RHEL 自带的 yaml-cpp 等）
 #   仅为 Release / Debug 提供 IMPORTED_LOCATION，不含 RelWithDebInfo / MinSizeRel。
 #   不设置该映射时，CMake 会对每个链接到此 target 的目标都警告一次（CMP0111）。
 #   下面让这两种构建类型依次尝试自动回退到 Release / NOCONFIG / 无后缀，消除刷屏告警。
@@ -97,27 +97,6 @@ if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
     endif ()
 endif ()
 
-set(LIBTORCH_LOCAL_PATH "${CMAKE_SOURCE_DIR}/third_pkgs/libtorch")
-list(APPEND CMAKE_PREFIX_PATH "${LIBTORCH_LOCAL_PATH}")
-message(STATUS "Project-local LibTorch path added: ${LIBTORCH_LOCAL_PATH}")
-message(STATUS "Current CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
-
-# 提前加载 Protobuf（如果可用）。
-# 原因：libtorch 的 TorchConfig 会顺手创建一个 imported target
-#   protobuf::libprotobuf 指向其内嵌的 protobuf，但**不会**创建 sibling
-#   target（protoc / libprotoc 等）。等到后续 find_package(gRPC) 内部
-#   find_dependency(Protobuf) 时，vcpkg 的 protobuf-targets.cmake 检测到
-#   "部分 target 已定义、部分未定义" 就会报错中止。
-# 解决：在 Torch 之前先让 vcpkg/系统 protobuf 把全套 target 一次性导入。
-#       这样 Torch 后续遇到的就是完整 cache，不会再重复创建。
-find_package(Protobuf CONFIG QUIET)
-if (NOT Protobuf_FOUND)
-    find_package(Protobuf MODULE QUIET)
-endif ()
-
-find_package(Torch REQUIRED)
-message(STATUS "Found Torch: ${Torch_VERSION}")
-
 set (NVIDIA "" CACHE PATH "Path to Nvidia driver source")
 set (KERNEL "/lib/modules/${CMAKE_SYSTEM_VERSION}/build" CACHE PATH "Path to kernel source, or module directory")
 
@@ -169,7 +148,7 @@ include_directories ("${PROJECT_SOURCE_DIR}/backends/local/nvme/libnvm/src"
                      "${PROJECT_SOURCE_DIR}/backends/local/nvme/libnvm/include")
 
 # Try to find Nvidia driver
-if (CUDA_FOUND AND NOT no_cuda)
+if (CUDAToolkit_FOUND AND NOT no_cuda)
 
     # Try to find Nvidia headers (will choose the newest version)
     file (GLOB_RECURSE driver_paths "/usr/src/nvidia-*/nv-p2p.h")
@@ -360,10 +339,6 @@ file (GLOB nvmeservice_sources "${nvmeservice_root}/src/*.cpp" "${nvmeservice_ro
 
 # ---------------------------------------------------------------------------
 # gRPC discovery
-#
-# Protobuf 已在 Torch 之前提前加载（见上方 find_package(Protobuf CONFIG QUIET)），
-# 这里只需查找 gRPC。其内部 find_dependency(Protobuf) 会复用已 cache 的结果，
-# 不会触发 vcpkg protobuf-targets 的"部分 target 已定义"保护错误。
 #
 # 推荐通过以下任一方式提供 Protobuf / gRPC：
 #   1) vcpkg toolchain（跨发行版统一版本，推荐）

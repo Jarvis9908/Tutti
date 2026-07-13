@@ -18,31 +18,17 @@ All paths are relative to the project root unless stated otherwise.
 Use `scripts/prepare_env.sh` for one-shot dependency setup. The script:
 
 - Installs `protobuf` / `gRPC` / `uuid` and friends per distro (Debian/Ubuntu/RHEL/CentOS/TencentOS/Fedora/openSUSE/Arch); when system packages are unavailable it falls back to building `grpc` + `yaml-cpp` via vcpkg.
-- Downloads a libtorch matching the host CUDA version into `third_pkgs/libtorch`.
 - Generates `CMakePresets.json` in the project root (**machine-generated, gitignored, do not commit**).
 
 ```bash
-bash scripts/prepare_env.sh            # optional: -j N for parallelism, -f to force re-download libtorch
+bash scripts/prepare_env.sh            # optional: -j N for parallelism
 ```
 
 Common environment variables:
 
 | Variable | Effect |
 | --- | --- |
-| `CUDA_VER` | Manually set the CUDA version (e.g. `CUDA_VER=12.8`), overriding auto-detection |
-| `LIBTORCH_URL` | Manually set the libtorch download URL for a CUDA version not in the built-in table |
 | `VCPKG_ROOT` | vcpkg install path (default `third_pkgs/vcpkg`) |
-
-### libtorch / CMAKE_PREFIX_PATH
-
-`CMakeLists.txt` automatically adds `third_pkgs/libtorch` to `CMAKE_PREFIX_PATH`, so **normally you don't need to set anything**.
-
-If you want to use the **torch from your Python environment** instead of the script-downloaded libtorch, get its CMake path and pass it via `-DCMAKE_PREFIX_PATH`:
-
-```bash
-python -c "import torch; print(torch.utils.cmake_prefix_path)"
-# then: cmake --preset default -DCMAKE_PREFIX_PATH=<the path printed above>
-```
 
 ## 1.2 Build Tutti
 

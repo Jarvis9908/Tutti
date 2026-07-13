@@ -1,8 +1,7 @@
 #!/bin/bash
 # Tutti 一键环境准备脚本
 # 目标：在多种 Linux 发行版（Debian/Ubuntu/RHEL/CentOS/TencentOS/Fedora/openSUSE/Arch）
-#       上自动安装 protobuf/gRPC/uuid 等依赖，并按 CUDA 版本下载匹配的 libtorch。
-# 兼容：x86_64 / aarch64（libtorch 仅在 x86_64 提供 GPU 包，aarch64 仅支持 CPU 包）。
+#       上自动安装 protobuf/gRPC/uuid 等依赖（gRPC 在 RHEL/TencentOS 等仓库缺失时回退 vcpkg）。
 
 set -eu
 # 注意：不开启 pipefail，因为 install_pkg 中允许部分非致命失败被吞掉。
@@ -24,7 +23,6 @@ else
 fi
 
 # 解析命令行参数
-FORCE_REINSTALL=0
 # 默认使用全部 CPU 核数；nproc 不可用时回退到 4
 if command -v nproc >/dev/null 2>&1; then
     JOBS="$(nproc)"
@@ -35,23 +33,16 @@ fi
 show_help() {
     cat <<EOF
 用法: $0 [选项]
-  -f, --force         强制重新下载/解压 libtorch（即使已存在匹配版本）
   -j N, --jobs N      并行编译线程数（用于 vcpkg 等后续编译，默认 ${JOBS} = nproc）
   -j=N, --jobs=N      同上
   -h, --help          显示帮助
 环境变量:
-  CUDA_VER            手动指定 CUDA 版本，如 CUDA_VER=13.0
-  LIBTORCH_URL        未在表中的 CUDA 版本时，手动指定 libtorch 下载链接
   VCPKG_ROOT          指定 vcpkg 安装路径（默认 \${PROJECT_ROOT}/third_pkgs/vcpkg）
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -f|--force)
-            FORCE_REINSTALL=1
-            shift
-            ;;
         -j|--jobs)
             if [ -z "${2:-}" ] || [[ "$2" == -* ]]; then
                 echo "错误：$1 需要一个整数参数。" >&2
@@ -372,191 +363,6 @@ if ! command -v grpc_cpp_plugin >/dev/null 2>&1; then
     else
         echo "警告：grpc_cpp_plugin 未在 PATH 中。若使用系统 grpc，请确认 grpc-plugins / protobuf-compiler-grpc 已安装。"
     fi
-fi
-
-# 检测 CUDA 版本（优先级：环境变量 CUDA_VER > nvcc > nvidia-smi）
-# 输出形如 "12.8" / "13.0" 的字符串，赋值给 CUDA_VERSION
-detect_cuda_version() {
-    if [ -n "${CUDA_VER:-}" ]; then
-        CUDA_VERSION="${CUDA_VER}"
-        echo "使用环境变量指定的 CUDA 版本: ${CUDA_VERSION}"
-        return 0
-    fi
-
-    local nvcc_bin=""
-    if command -v nvcc >/dev/null 2>&1; then
-        nvcc_bin="nvcc"
-    elif [ -x /usr/local/cuda/bin/nvcc ]; then
-        nvcc_bin="/usr/local/cuda/bin/nvcc"
-    fi
-
-    if [ -n "$nvcc_bin" ]; then
-        # 形如: "Cuda compilation tools, release 12.8, V12.8.61"
-        CUDA_VERSION="$($nvcc_bin --version 2>/dev/null \
-            | grep -oE 'release [0-9]+\.[0-9]+' \
-            | awk '{print $2}')"
-    fi
-
-    if [ -z "$CUDA_VERSION" ] && command -v nvidia-smi >/dev/null 2>&1; then
-        # 形如: "CUDA Version: 13.0"
-        CUDA_VERSION="$(nvidia-smi 2>/dev/null \
-            | grep -oE 'CUDA Version: [0-9]+\.[0-9]+' \
-            | awk '{print $3}' | head -n1)"
-    fi
-
-    if [ -z "$CUDA_VERSION" ]; then
-        echo "未能检测到 CUDA 版本（nvcc / nvidia-smi 都不可用）。"
-        echo "请通过环境变量指定，例如: CUDA_VER=12.8 $0"
-        return 1
-    fi
-    echo "检测到 CUDA 版本: ${CUDA_VERSION}"
-}
-
-# 按 CUDA 版本 + 架构选择对应的 libtorch 下载 URL
-# 参考：https://pytorch.org/get-started/locally/ 与 https://download.pytorch.org/libtorch/
-# 同时设置 LIBTORCH_BUILD_VERSION，形如 "2.12.0+cu130"，用于与本地 build-version 比对
-#
-# 注意：libtorch 官方仅在 x86_64 上提供 GPU 版（cu*）；
-#   - aarch64 用户需自行编译 PyTorch from source 或使用 NVIDIA Jetson 提供的预编译包。
-#   - 若需 CPU-only 版，请通过 LIBTORCH_URL 环境变量指定。
-resolve_libtorch_url() {
-    local major minor tag
-    major="${CUDA_VERSION%%.*}"
-    minor="${CUDA_VERSION#*.}"
-    minor="${minor%%.*}"
-    tag="cu${major}${minor}"
-
-    # 架构兜底：非 x86_64 直接劝退使用环境变量
-    if [ "$ARCH" != "x86_64" ] && [ -z "${LIBTORCH_URL:-}" ]; then
-        echo "当前架构为 ${ARCH}，PyTorch 官方 libtorch 仅在 x86_64 上提供 GPU 预编译包。"
-        echo "请通过环境变量 LIBTORCH_URL 指定适用于 ${ARCH} 的 libtorch 下载链接，"
-        echo "或参考 https://pytorch.org/get-started/locally/ 自行编译。"
-        return 1
-    fi
-
-    case "$tag" in
-        cu130)
-            # CUDA 13.0 - libtorch 2.12.0
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cu130/libtorch-shared-with-deps-2.12.0%2Bcu130.zip"
-            LIBTORCH_BUILD_VERSION="2.12.0+cu130"
-            ;;
-        cu128)
-            # CUDA 12.8 - libtorch 2.7.1 (cxx11 ABI)
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cu128/libtorch-cxx11-abi-shared-with-deps-2.7.1%2Bcu128.zip"
-            LIBTORCH_BUILD_VERSION="2.7.1+cu128"
-            ;;
-        cu126)
-            # CUDA 12.6 - libtorch 2.6.0 (cxx11 ABI)
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cu126/libtorch-cxx11-abi-shared-with-deps-2.6.0%2Bcu126.zip"
-            LIBTORCH_BUILD_VERSION="2.6.0+cu126"
-            ;;
-        cu124)
-            # CUDA 12.4 - libtorch 2.5.1 (cxx11 ABI)
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cu124/libtorch-cxx11-abi-shared-with-deps-2.5.1%2Bcu124.zip"
-            LIBTORCH_BUILD_VERSION="2.5.1+cu124"
-            ;;
-        cu121)
-            # CUDA 12.1 - libtorch 2.4.1 (cxx11 ABI)
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-2.4.1%2Bcu121.zip"
-            LIBTORCH_BUILD_VERSION="2.4.1+cu121"
-            ;;
-        cu118)
-            # CUDA 11.8 - libtorch 2.4.1 (cxx11 ABI)
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cu118/libtorch-cxx11-abi-shared-with-deps-2.4.1%2Bcu118.zip"
-            LIBTORCH_BUILD_VERSION="2.4.1+cu118"
-            ;;
-        *)
-            echo "暂未为 CUDA ${CUDA_VERSION} (${tag}) 配置默认的 libtorch 下载链接。"
-            echo "可手动设置 LIBTORCH_URL 环境变量后重试，或在脚本中补充对应分支。"
-            if [ -n "${LIBTORCH_URL:-}" ]; then
-                echo "使用环境变量指定的 LIBTORCH_URL: ${LIBTORCH_URL}"
-                LIBTORCH_BUILD_VERSION=""
-            else
-                return 1
-            fi
-            ;;
-    esac
-    echo "对应 libtorch 下载地址: ${LIBTORCH_URL}"
-}
-
-detect_cuda_version || exit 1
-resolve_libtorch_url || exit 1
-
-# 定义变量
-third_pkgs_dir="${PROJECT_ROOT}/third_pkgs"
-libtorch_dir="${third_pkgs_dir}/libtorch"
-libtorch_version_file="${libtorch_dir}/build-version"
-url="${LIBTORCH_URL}"
-zip_file_name="${third_pkgs_dir}/libtorch.zip"
-
-# 创建 third_pkgs 目录
-if [ ! -d "$third_pkgs_dir" ]; then
-    mkdir -p "$third_pkgs_dir"
-    echo "已创建目录: $third_pkgs_dir"
-else
-    echo "目录已存在: $third_pkgs_dir"
-fi
-
-# 已安装版本检测：依据 third_pkgs/libtorch/build-version 是否匹配目标版本
-need_install_libtorch=1
-if [ "$FORCE_REINSTALL" = "1" ]; then
-    echo "已指定 --force，将强制重新下载 libtorch。"
-elif [ -f "$libtorch_version_file" ]; then
-    installed_ver="$(tr -d '[:space:]' < "$libtorch_version_file")"
-    if [ -n "$LIBTORCH_BUILD_VERSION" ] && [ "$installed_ver" = "$LIBTORCH_BUILD_VERSION" ]; then
-        echo "检测到已安装的 libtorch 版本 ${installed_ver}，与目标 ${LIBTORCH_BUILD_VERSION} 一致，跳过下载。"
-        need_install_libtorch=0
-    elif [ -z "$LIBTORCH_BUILD_VERSION" ]; then
-        echo "已存在 libtorch (build-version=${installed_ver})，但当前未配置目标版本，跳过下载。"
-        echo "如需替换，请使用 --force 强制重新下载。"
-        need_install_libtorch=0
-    else
-        echo "检测到已安装的 libtorch 版本 ${installed_ver}，与目标 ${LIBTORCH_BUILD_VERSION} 不一致，将重新下载。"
-    fi
-elif [ -d "$libtorch_dir" ]; then
-    echo "目录 ${libtorch_dir} 已存在但缺少 build-version 文件，将重新下载以确保版本一致。"
-fi
-
-if [ "$need_install_libtorch" = "1" ]; then
-    # 清理可能存在的旧目录，避免解压冲突
-    if [ -d "$libtorch_dir" ]; then
-        echo "清理旧的 libtorch 目录: $libtorch_dir"
-        rm -rf "$libtorch_dir"
-    fi
-
-    # 下载 ZIP 文件（优先 wget，回退到 curl）
-    echo "开始下载文件: $url"
-    if command -v wget >/dev/null 2>&1; then
-        if ! wget -O "$zip_file_name" "$url"; then
-            echo "wget 下载失败，请检查网络或URL是否正确。"
-            exit 1
-        fi
-    elif command -v curl >/dev/null 2>&1; then
-        if ! curl -fL -o "$zip_file_name" "$url"; then
-            echo "curl 下载失败，请检查网络或URL是否正确。"
-            exit 1
-        fi
-    else
-        echo "未找到 wget / curl，无法下载 libtorch。请先安装其一后重试。"
-        exit 1
-    fi
-    echo "文件已下载并保存为: $zip_file_name"
-
-    # 解压 ZIP 文件
-    if ! command -v unzip >/dev/null 2>&1; then
-        echo "未找到 unzip，无法解压 libtorch。请先安装 unzip 后重试。"
-        exit 1
-    fi
-    echo "正在解压文件..."
-    if ! unzip -q "$zip_file_name" -d "$third_pkgs_dir"; then
-        echo "解压失败，请检查ZIP文件是否完整。"
-        exit 1
-    fi
-    echo "文件已成功解压到: $third_pkgs_dir"
-
-    # 清理 ZIP 文件
-    echo "正在清理临时文件..."
-    rm -f "$zip_file_name"
 fi
 
 echo "操作完成！"
