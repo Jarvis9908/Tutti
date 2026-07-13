@@ -58,7 +58,7 @@ struct ctrl
     int                 number;     /* Controller number */
     dev_t               rdev;       /* Character device register */
     struct class*       cls;        /* Character device class */
-    struct cdev         cdev;       /* Character device */
+    struct cdev        *cdev;       /* Character device (separately allocated) */
     struct device*      chrdev;     /* Character device handle */
     struct nvme_dev *dev;
     /*****info about user defined nvme io qp **** */
