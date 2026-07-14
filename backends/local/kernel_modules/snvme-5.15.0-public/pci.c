@@ -5679,11 +5679,9 @@ static int snvm_chrdev_create(struct pci_dev *pdev, unsigned int class){
 		return PTR_ERR(ctrl);
 	}
 	err = ctrl_chrdev_create(ctrl, dev_first, &snvm_dev_fops);
-	if (err != 0){
-		/* Same tear-down ordering rule as snvm_chrdev_helper(!create):
-		 * release the ctrl (which unwinds whatever ctrl_chrdev_create
-		 * partially built) before returning the minor to the IDA pool. */
-		ctrl_put(ctrl);
+	if (err != 0) {
+		/* ctrl_chrdev_create() already removed + freed ctrl on failure;
+		* do NOT call ctrl_put(ctrl) here. */
 		ida_simple_remove(&snvm_chrdev_minor_ida, minor);
 		return err;
 	}
