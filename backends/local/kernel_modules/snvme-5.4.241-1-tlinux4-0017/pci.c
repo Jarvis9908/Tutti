@@ -6983,14 +6983,8 @@ static int snvm_chrdev_create(struct pci_dev *pdev, unsigned int class)
 
 	err = ctrl_chrdev_create(ctrl, dev_first, &snvm_dev_fops);
 	if (err != 0) {
-		/*
-		 * PORTING.md section 7.3.1: same tear-down rule as
-		 * snvm_chrdev_helper(remove) -- ctrl_put() FIRST, then
-		 * ida_simple_remove().  ctrl_put() needs ctrl->number
-		 * (= the minor) to drive device_destroy() / cdev_del()
-		 * for whatever ctrl_chrdev_create() partially built.
-		 */
-		ctrl_put(ctrl);
+		/* ctrl_chrdev_create() already removed + freed ctrl on failure;
+		* do NOT call ctrl_put(ctrl) here. */
 		ida_simple_remove(&snvm_chrdev_minor_ida, minor);
 		return err;
 	}

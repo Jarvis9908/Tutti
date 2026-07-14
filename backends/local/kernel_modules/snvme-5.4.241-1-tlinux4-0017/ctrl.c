@@ -27,7 +27,6 @@ struct ctrl* ctrl_get(struct list* list, struct class* cls, struct pci_dev* pdev
     ctrl->number = number;
     ctrl->rdev = 0;
     ctrl->cls = cls;
-    ctrl->cdev   = NULL;
     ctrl->chrdev = NULL;
     ctrl->use_sreg = 0;
     ctrl->ioq_num = 0;
@@ -80,15 +79,13 @@ void ctrl_put(struct ctrl* ctrl)
         list_remove(&ctrl->list);
         ctrl_chrdev_remove(ctrl);
         /*
-         * B3 user-QID bitmap: kfree handles NULL.  By the time
-         * ctrl_put runs, every fd that could allocate from this
-         * pool has been closed (chrdev is being torn down), so
-         * no concurrent access -- no need to take user_qid_lock.
+         * ctrl->cdev is embedded in ctrl.  ctrl_chrdev_remove() calls
+         * cdev_del() which unregisters the character device but does
+         * NOT wait for in-flight references to drop.  The actual
+         * kfree(ctrl) is deferred to ctrl_cdev_release(), which fires
+         * when the last kobject reference to ctrl->cdev.kobj is
+         * released (e.g. after all open file descriptors are closed).
          */
-        kfree(ctrl->user_qid_bitmap);
-        ctrl->user_qid_bitmap = NULL;
-        mutex_destroy(&ctrl->user_qid_lock);
-        kfree(ctrl);
     }
 }
 // EXPORT_SYMBOL_GPL(ctrl_put);
@@ -125,7 +122,7 @@ struct ctrl* ctrl_find_by_inode(const struct list* list, const struct inode* ino
     {
         ctrl = container_of(element, struct ctrl, list);
 
-        if (ctrl->cdev && ctrl->cdev == inode->i_cdev)
+        if (&ctrl->cdev == inode->i_cdev)
         {
             return ctrl;
         }
@@ -139,11 +136,33 @@ struct ctrl* ctrl_find_by_inode(const struct list* list, const struct inode* ino
 
 
 
-int ctrl_chrdev_create(struct ctrl* ctrl, dev_t first, const struct file_operations* fops)
+/*
+ * kobject release callback for ctrl->cdev.kobj.
+ *
+ * cdev is embedded in struct ctrl, so ctrl cannot be freed until
+ * ALL kobject references to ctrl->cdev are dropped (including those
+ * held by still-open file descriptors).  This callback is invoked
+ * after cdev_del() + the final kobject_put(), guaranteeing that no
+ * thread can access ctrl through the cdev or its kobj anymore.
+ */
+static void ctrl_cdev_release(struct kobject *kobj)
+{
+
+    struct ctrl *ctrl = container_of(kobj, struct ctrl, cdev.kobj);
+    printk(KERN_INFO "ctrl_cdev_release %s %p\n", ctrl->name, (void *)kobj);
+    kfree(ctrl->user_qid_bitmap);
+    ctrl->user_qid_bitmap = NULL;
+    mutex_destroy(&ctrl->user_qid_lock);
+    kfree(ctrl);
+}
+
+static struct kobj_type ctrl_ktype = {.release = ctrl_cdev_release};
+
+int ctrl_chrdev_create(struct ctrl* ctrl, dev_t first,
+                       const struct file_operations* fops)
 {
     int err;
-    struct device* chrdev = NULL;
-    struct cdev *cdev;
+    struct device* chrdev;
 
     if (ctrl->chrdev != NULL)
     {
@@ -151,32 +170,29 @@ int ctrl_chrdev_create(struct ctrl* ctrl, dev_t first, const struct file_operati
         return 0;
     }
 
-    cdev = kmalloc(sizeof(*cdev), GFP_KERNEL);
-    if (!cdev)
-        return -ENOMEM;
-    ctrl->cdev  = cdev;
-
     ctrl->rdev = MKDEV(MAJOR(first), ctrl->number);
     printk("nuo is %d\n", ctrl->rdev);
 
-    cdev_init(ctrl->cdev, fops);
-    err = cdev_add(ctrl->cdev, ctrl->rdev, 1);
-    if (err != 0)
-    {
+    cdev_init(&ctrl->cdev, fops);
+    ctrl->cdev.kobj.ktype = &ctrl_ktype;
+
+    err = cdev_add(&ctrl->cdev, ctrl->rdev, 1);
+    if (err != 0) {
         printk(KERN_ERR "Failed to add cdev\n");
-        ctrl->cdev = NULL;
-        kfree(cdev);
+        /* cdev never mapped -> no fd can hold it, refcount == 1.
+         * Take ownership of teardown; caller must NOT ctrl_put(). */
+        list_remove(&ctrl->list);
+        kobject_put(&ctrl->cdev.kobj);   /* -> ctrl_cdev_release -> kfree(ctrl) */
         return err;
     }
 
     chrdev = device_create(ctrl->cls, NULL, ctrl->rdev, NULL, ctrl->name);
-    if (IS_ERR(chrdev))
-    {
-        cdev_del(ctrl->cdev);
-        ctrl->cdev = NULL;
-        /* cdev_del may trigger ctrl_cdev_release → kfree(ccdev)+kfree(ctrl) */
+    if (IS_ERR(chrdev)) {
         printk(KERN_ERR "Failed to create character device\n");
-        return PTR_ERR(chrdev);
+        err = PTR_ERR(chrdev);
+        list_remove(&ctrl->list);
+        cdev_del(&ctrl->cdev);           /* drops ref -> may kfree(ctrl) */
+        return err;
     }
 
     ctrl->chrdev = chrdev;
@@ -193,15 +209,28 @@ void ctrl_chrdev_remove(struct ctrl* ctrl)
 {
     if (ctrl->chrdev != NULL)
     {
+        /*
+         * cdev_del() drops the base kobject reference that cdev_init()
+         * acquired.  If all open file descriptors have already been
+         * closed, the refcount will hit zero inside cdev_del() and
+         * ctrl_cdev_release() will kfree(ctrl) synchronously.
+         *
+         * Save every field we need *after* cdev_del() into local
+         * variables so we never touch a possibly-freed ctrl.
+         */
+        struct class *cls  = ctrl->cls;
+        dev_t         rdev = ctrl->rdev;
+        char          name[64];
+        strscpy(name, ctrl->name, sizeof(name));
+
         // pci_dev_put(ctrl->pdev);
         printk("ctrl_chrdev_remove pci_dev_put\n");
-        device_destroy(ctrl->cls, ctrl->rdev);
-        cdev_del(ctrl->cdev);
         ctrl->chrdev = NULL;
-        ctrl->cdev   = NULL;
+        cdev_del(&ctrl->cdev);       /* may kfree(ctrl) here */
+        device_destroy(cls, rdev);   /* use saved values */
 
         printk(KERN_DEBUG "Character device /dev/%s removed (%d.%d)\n",
-                ctrl->name, MAJOR(ctrl->rdev), MINOR(ctrl->rdev));
+                name, MAJOR(rdev), MINOR(rdev));
     }
 }
 EXPORT_SYMBOL_GPL(ctrl_chrdev_remove);
