@@ -7154,6 +7154,15 @@ static int __init nvme_init(void)
 		return -EOPNOTSUPP;
 	}
 
+	/*
+	 * Probe the optional Phoenix P2P service once.  If phoenixfs is
+	 * loaded, this caches its phxfs_p2p_* function pointers and holds
+	 * a module reference for snvme's lifetime (so phoenixfs cannot be
+	 * unloaded while snvme is loaded).  If phoenixfs is absent, GPU
+	 * memory registration falls back to the native nvidia_p2p path.
+	 */
+	map_p2p_service_probe();
+
 	list_init(&ctrl_list);
 	list_init(&host_list);
 	list_init(&device_list);
@@ -7313,7 +7322,15 @@ static void __exit nvme_exit(void)
 	/* Step 4: tear down the singleton /dev/snvm_control + class. */
 	snvm_cdev_release();
 
-	/* Step 5: drop the GPU/p2p notifier registration. */
+	/*
+	 * Step 5: drop the Phoenix P2P service reference taken in
+	 * nvme_init.  Safe here because every map (and thus every
+	 * phxfs_p2p handle) has already been drained by the
+	 * clear_map_list() calls in Step 2.
+	 */
+	map_p2p_service_release();
+
+	/* Step 6: drop the GPU/p2p notifier registration. */
 	nvfs_nvidia_p2p_exit();
 }
 

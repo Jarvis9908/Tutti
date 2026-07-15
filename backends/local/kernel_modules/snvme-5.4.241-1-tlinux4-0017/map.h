@@ -122,4 +122,14 @@ struct map* map_find_by_pci_dev_and_idx(const struct list* list, const struct pc
  */
 unsigned long map_purge_by_owner(struct list* list, struct task_struct* owner);
 
+/*
+ * Phoenix P2P service probe/release.  Called exactly once from the
+ * snvme.ko module init/exit to resolve (and hold a reference to) the
+ * phoenixfs phxfs_p2p_* symbols.  Holding the reference for snvme's
+ * lifetime keeps phoenixfs pinned (cannot rmmod while snvme is loaded)
+ * and avoids per-registration __symbol_get overhead.  See map.c.
+ */
+void map_p2p_service_probe(void);
+void map_p2p_service_release(void);
+
 #endif /* __LIBNVM_HELPER_MAP_H__ */

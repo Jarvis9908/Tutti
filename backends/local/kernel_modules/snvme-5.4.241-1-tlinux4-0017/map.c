@@ -10,6 +10,7 @@
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
+#include <linux/module.h>
 #include "nvfs-p2p.h"
 
 
@@ -18,6 +19,12 @@ struct gpu_region
 {
     nvidia_p2p_page_table_t* pages;
     nvidia_p2p_dma_mapping_t** mappings;
+    /*
+     * Phoenix service path: when non-NULL, pages/mappings are unused
+     * and cleanup goes through phx_deregister_fn instead of
+     * nvidia_p2p_dma_unmap_pages + nvidia_p2p_put_pages.
+     */
+    void*                    phx_handle;
 };
 
 
@@ -27,6 +34,74 @@ struct gpu_region
 #define GPU_PAGE_MASK   ~(GPU_PAGE_SIZE - 1)
 
 uint32_t max_num_ctrls = 8;
+
+
+/*
+ * Phoenix P2P service (phoenixfs.ko) integration.
+ *
+ * When Phoenix has remapped a GPU's BAR via devm_memremap_pages
+ * (MEMORY_DEVICE_PCI_P2PDMA), nvidia_p2p_dma_map_pages fails for that
+ * GPU.  Phoenix exports phxfs_p2p_register/phxfs_p2p_deregister which
+ * pin the GPU pages and return the physical addresses directly as bus
+ * addresses (valid under IOMMU=pt).  We resolve these symbols once at
+ * module init and hold the reference for the lifetime of snvme -- this
+ * both avoids the per-call __symbol_get overhead and guarantees that
+ * phoenixfs cannot be unloaded while snvme is loaded.
+ *
+ * Load order: phoenixfs must be loaded before snvme for the service to
+ * be picked up; otherwise snvme falls back to its own nvidia_p2p path
+ * for its whole lifetime.
+ */
+struct phxfs_p2p_handle;
+typedef int  (*phxfs_p2p_register_fn)(uint64_t, uint64_t,
+                                      struct phxfs_p2p_handle**,
+                                      const uint64_t**, uint32_t*);
+typedef void (*phxfs_p2p_deregister_fn)(struct phxfs_p2p_handle*);
+
+static phxfs_p2p_register_fn   phx_register_fn;
+static phxfs_p2p_deregister_fn phx_deregister_fn;
+
+/* Defined later in this file; used by force_release_gpu_memory's guard. */
+void release_gpu_memory(struct map* map);
+
+void map_p2p_service_probe(void)
+{
+    phx_register_fn   = (phxfs_p2p_register_fn)   __symbol_get("phxfs_p2p_register");
+    phx_deregister_fn = (phxfs_p2p_deregister_fn) __symbol_get("phxfs_p2p_deregister");
+
+    if (phx_register_fn != NULL && phx_deregister_fn != NULL)
+    {
+        printk(KERN_INFO "snvme: phoenix P2P service detected, using it for GPU memory registration\n");
+    }
+    else
+    {
+        /* Both symbols must be present as a pair; release any partial hold. */
+        if (phx_register_fn != NULL)
+        {
+            __symbol_put("phxfs_p2p_register");
+            phx_register_fn = NULL;
+        }
+        if (phx_deregister_fn != NULL)
+        {
+            __symbol_put("phxfs_p2p_deregister");
+            phx_deregister_fn = NULL;
+        }
+    }
+}
+
+void map_p2p_service_release(void)
+{
+    if (phx_register_fn != NULL)
+    {
+        __symbol_put("phxfs_p2p_register");
+        phx_register_fn = NULL;
+    }
+    if (phx_deregister_fn != NULL)
+    {
+        __symbol_put("phxfs_p2p_deregister");
+        phx_deregister_fn = NULL;
+    }
+}
 
 
 static struct map* create_descriptor(const struct ctrl* ctrl, u64 vaddr, unsigned long n_pages)
@@ -331,6 +406,21 @@ static void force_release_gpu_memory(struct map* map)
     struct gpu_region* gd = (struct gpu_region*) map->data;
     struct list* list = map->ctrl_list;
 
+    /*
+     * Defensive: snvme never registers this callback for Phoenix maps
+     * (Phoenix's own free_cb handles force-release), so we should never
+     * get here with a phx_handle set.  Route through release_gpu_memory
+     * so the phoenixfs deregister still runs and the module refcount is
+     * balanced.
+     */
+    if (gd != NULL && gd->phx_handle != NULL)
+    {
+        WARN_ON(1);
+        release_gpu_memory(map);
+        unmap_and_release(map);
+        return;
+    }
+
     if (gd != NULL)
     {
         if (gd->mappings != NULL)
@@ -398,6 +488,24 @@ void release_gpu_memory(struct map* map)
 
     if (gd != NULL)
     {
+        if (gd->phx_handle != NULL)
+        {
+            /*
+             * Phoenix service path: delegate cleanup to Phoenix.  It
+             * does nvidia_p2p_put_pages (or skips it if the pages were
+             * already force-reclaimed via its free_cb) + frees its
+             * internal state + module_put.  phx_deregister_fn is
+             * guaranteed non-NULL here because snvme holds a reference
+             * to phoenixfs for its whole lifetime.
+             */
+            if (phx_deregister_fn != NULL)
+                phx_deregister_fn(gd->phx_handle);
+            gd->phx_handle = NULL;
+            kfree(gd);
+            map->data = NULL;
+            return;
+        }
+
         if (gd->mappings != NULL)
         {
             const struct list_node* element = list_next(&list->head);
@@ -474,23 +582,55 @@ int map_gpu_memory(struct map* map, struct list* list)
         return -ENOMEM;
     }
 
+    gd->pages      = NULL;
+    gd->mappings   = NULL;
+    gd->phx_handle = NULL;
+
+    map->page_size = GPU_PAGE_SIZE;
+    map->data = gd;
+    map->release = release_gpu_memory;
+
+    /* ---- Try the Phoenix P2P service first (resolved once at init) ---- */
+    if (phx_register_fn != NULL)
+    {
+        struct phxfs_p2p_handle* handle = NULL;
+        const uint64_t* ioaddrs = NULL;
+        uint32_t n = 0;
+
+        err = phx_register_fn(map->vaddr, GPU_PAGE_SIZE * map->n_addrs,
+                              &handle, &ioaddrs, &n);
+        if (err == 0 && handle != NULL)
+        {
+            /*
+             * Phoenix pinned the pages and returned bus addresses
+             * directly (skipping nvidia_p2p_dma_map_pages, which fails
+             * once Phoenix has remapped the GPU BAR).  The handle owns
+             * the lifecycle -- including the phoenixfs module refcount
+             * -- until release_gpu_memory -> phx_deregister_fn.
+             */
+            gd->phx_handle = handle;
+            map->n_addrs = n;
+            for (i = 0; i < n; ++i)
+                map->addrs[i] = ioaddrs[i];
+            return 0;
+        }
+        /*
+         * Registration failed for this GPU -- fall through to the
+         * normal nvidia_p2p path.
+         */
+    }
+
+    /* ---- Normal path: nvidia_p2p_get_pages + dma_map_pages ---- */
     gd->mappings = (nvidia_p2p_dma_mapping_t**)  kmalloc(sizeof(nvidia_p2p_dma_mapping_t*) * max_num_ctrls, GFP_KERNEL);
     
     if (gd->mappings == NULL)
     {
         printk(KERN_CRIT "Failed to allocate mapping descriptor\n");
-        kfree(gd);
+        /* gd is freed by release_gpu_memory via unmap_and_release */
         return -ENOMEM;
     }
     for (j = 0; j < max_num_ctrls; j++)
         gd->mappings[j] = NULL;
-
-    gd->pages = NULL;
-    //gd->mappings = NULL;
-
-    map->page_size = GPU_PAGE_SIZE;
-    map->data = gd;
-    map->release = release_gpu_memory;
 
     // get the io addr
     err = nvfs_nvidia_p2p_get_pages(0, 0, map->vaddr, GPU_PAGE_SIZE * map->n_addrs, &gd->pages, 
