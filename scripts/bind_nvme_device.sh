@@ -99,28 +99,46 @@ unbind_current_driver() {
 # Function to bind to nvme driver
 bind_to_nvme() {
     local pci_bdf="$1"
-    
+
+    # Ensure the nvme driver is actually available
+    if [[ ! -d /sys/bus/pci/drivers/nvme ]]; then
+        echo "✗ nvme driver is not loaded; cannot bind $pci_bdf"
+        echo "  Try: modprobe nvme"
+        exit 1
+    fi
+
     echo "Binding $pci_bdf to nvme driver..."
-    
+
     # Get vendor and device IDs
     local vendor_id
     local device_id
     vendor_id=$(cat "/sys/bus/pci/devices/$pci_bdf/vendor")
     device_id=$(cat "/sys/bus/pci/devices/$pci_bdf/device")
-    
+
     # Remove 0x prefix
     vendor_id=${vendor_id#0x}
     device_id=${device_id#0x}
-    
-    # Create new_id entry if nvme driver doesn't already support this device
+
+    # Register the device ID with the nvme driver (so it can probe this device).
+    # This is NOT the same as binding; report it separately and do not claim success yet.
     if ! grep -q "$vendor_id $device_id" /sys/bus/pci/drivers/nvme/new_id 2>/dev/null; then
-        echo "$vendor_id $device_id" > /sys/bus/pci/drivers/nvme/new_id 2>/dev/null || true
-        echo "✓ Added device ID to nvme driver"
+        if echo "$vendor_id $device_id" > /sys/bus/pci/drivers/nvme/new_id 2>/dev/null; then
+            echo "✓ Registered device ID $vendor_id:$device_id with nvme driver"
+        else
+            echo "⚠ Could not register device ID with nvme driver (continuing anyway)"
+        fi
     fi
-    
-    # Bind to nvme driver
-    echo "$pci_bdf" > /sys/bus/pci/drivers/nvme/bind
-    echo "✓ Successfully bound to nvme driver"
+
+    # Bind the device to the nvme driver. Capture the result instead of letting
+    # set -e abort with a raw kernel error.
+    if echo "$pci_bdf" > /sys/bus/pci/drivers/nvme/bind 2>/dev/null; then
+        echo "✓ Successfully bound $pci_bdf to nvme driver"
+    else
+        echo "✗ Failed to bind $pci_bdf to nvme driver"
+        echo "  (kernel rejected the bind, e.g. ENODEV: device not currently enumerable/bindable)"
+        echo "  Check device state with: lspci -k -s $pci_bdf   and   lspci -vvv -s $pci_bdf"
+        exit 1
+    fi
 }
 
 # Function to verify binding

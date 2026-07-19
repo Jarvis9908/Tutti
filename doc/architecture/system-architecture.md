@@ -1,548 +1,555 @@
-# GeminiFS System Architecture
+# Tutti System Architecture
 
-> **Version**: v0.1 (Refactoring Phase)  
-> **Last Updated**: 2026-04-09  
-> **Status**: Active — reflects current code with v0.1 target gaps annotated
-
----
+> **Status**: v0.1 baseline. This document describes the architecture as
+> implemented in the current codebase, with explicit notes where the
+> implementation diverges from the `Roadmap.md` target.
 
 ## 1. Overview
 
-GeminiFS is a GPU-oriented Unified Storage Runtime that enables GPU kernels to submit NVMe I/O directly without CPU involvement in the data path. The runtime manages:
-
-- GPU memory registration and DMA mapping
-- NVMe controller lifecycle and queue management
-- GPU-side file abstraction and batched I/O submission
-- Persistent metadata for file and tensor mappings
-
-The current implementation is a **monolithic library** (`libgeminifs`) being refactored into the 8-layer architecture defined in `Roadmap.md`.
-
----
-
-## 2. Target Architecture
-
-Memory Layer and Device Manager are **independent parallel layers** — memory registration has no dependency on storage topology management, and vice versa. Both feed into IO Engine, which needs registered DMA buffers (from Memory Layer) and acquired NVMe queues (from Device Manager) to submit I/O.
-
-```mermaid
-graph TD
-    A["🔷 API Layer\npublic runtime APIs\n(GeminiFS class)"]
-    B["🔷 Adapter Layer\nLMCache · Mooncake\n❌ Not yet implemented"]
-    C["🔷 Core Runtime Layer\nobject model · lifecycle\n⚠️ Mixed into GeminiFS class"]
-    D["🔷 Memory Layer\nDMA registration · PRP/SGL mapping · region model\n⚠️ Partially in GPUController"]
-    E["🔷 Device Manager Layer\ndiscovery · topology · queue leasing\n⚠️ Mixed with IO engine"]
-    F["🔷 IO Engine Layer\nsubmission · completion · batching\n✅ Well-isolated on device side"]
-    G["🔷 Backend SPI Layer\nabstract backend interface\n❌ Not yet defined"]
-    H["🔷 Backend Implementations\nlocal_nvme (partial)\nGDS · RDMA (future)"]
-
-    A --> B
-    B --> C
-    C --> D
-    C --> E
-    D --> F
-    E --> F
-    F --> G
-    G --> H
-
-    style A fill:#1a3a5c,color:#fff,stroke:#4a9eff
-    style B fill:#5c1a1a,color:#fff,stroke:#ff4a4a
-    style C fill:#2d4a1a,color:#fff,stroke:#6aff4a
-    style D fill:#2d4a1a,color:#fff,stroke:#6aff4a
-    style E fill:#4a3a1a,color:#fff,stroke:#ffaa4a
-    style F fill:#1a3a5c,color:#fff,stroke:#4a9eff
-    style G fill:#5c1a1a,color:#fff,stroke:#ff4a4a
-    style H fill:#1a5c2d,color:#fff,stroke:#4aff8a
-```
-
----
-
-## 3. Current Component Map (As-Is)
-
-### 3.1 Class Hierarchy and Ownership
-
-```mermaid
-classDiagram
-    class GeminiFS {
-        -GPUFileManager* gpu_file_manager_
-        -vector~GPUControllerPtr~ gpu_controllers_
-        -vector~nvme_ctrl_param~ nvme_params_
-        +init(config_path, num_files, shape, reset)
-        +cleanup()
-        +geminifs_batched_read()
-        +geminifs_batched_write()
-        +geminifs_register_tensor_with_gpu()
-        +geminifs_gpu_open_file()
-    }
-
-    class GPUController {
-        -int device_id_
-        -string mount_base_path_
-        -map~ptr, geminifs_dma*~ dma_contexts_
-        -vector~NVMeControllerPtr~ nvme_controllers_
-        -unique_ptr~GPUMemoryMapper~ memory_mapper_
-        +registerTensorMemory(tensor, granularity)
-        +unregisterTensorMemory(ptr)
-        +getDMAContext(ptr) geminifs_dma*
-        +addNVMeController(ctrl)
-        +initialize()
-    }
-
-    class GPUMemoryMapper {
-        -unordered_map~ptr, GPUHashEntry*~ host_mappings_
-        -int device_id_
-        +initialize()
-        +addBatchMappings(ptr, size, mappings)
-        +lookupMappings(ptr) GPUHashEntry*
-        +removeAllMappings(ptr)
-    }
-
-    class GPUHashEntry {
-        +uint64_t dev_ptr
-        +uint64_t tensor_size
-        +PRPMappingEntrySpan mappings
-        +GPUHashEntry* next
-    }
-
-    class NVMeController {
-        +ControllerPtr controller
-        +unique_ptr~FileManager~ file_manager
-        +string mount_path
-        +uint64_t maxIOsize
-        +QueueAcquireHelper* d_queue_acquire_helper
-        +host_file_create_managed()
-        +device_file_create_managed()
-        +device_file_open_managed()
-        +g_open()
-    }
-
-    class GPUFileManager {
-        -string log_file_path_
-        -map~GPUFileId, GPUFileDesc~ file_id_to_desc_map_
-        -GPUControllerPtr gpu_controller_
-        -unique_ptr~BatchIoPool~ io_ctx_pool_
-        +createGPUFiles(file_size, count, shape)
-        +deleteGPUFile(id)
-        +getNVMeFilesSpanById(id)
-        +allocateIoContexts()
-        +releaseIoContexts()
-        +forcePersist()
-    }
-
-    class FileManager {
-        -string log_file_path_
-        -map~uint32, NVMeFileDesc~ nvme_file_id_to_file_map_
-        -vector~OpenFileHandle~ open_files_
-        +createFile(block_size, virt_size) NVMeFileId
-        +deleteFile(id)
-        +getFileById(id) NVMeFileDesc
-        +closeAllOpenFiles()
-        +forcePersist()
-    }
-
-    class geminifs_dma {
-        +uint64_t* ioaddrs
-        +DmaPtr dma_ptr
-        +uint64_t slice_granularity
-        +vector~GranularitySliceGroup~ granularity_groups
-        +DmaPtr type2_prp_dma_ptr
-    }
-
-    class GranularitySliceGroup {
-        +uint64_t gpu_tensor_ptr
-        +size_t granularity_offset
-        +size_t granularity_size
-        +vector~SubSliceInfo~ sub_slices
-        +vector~PRPMappingEntry~ prp_mappings
-    }
-
-    class PRPMappingEntry {
-        +uint32_t transfer_type
-        +uint32_t data_length
-        +uint64_t prp1
-        +uint64_t prp2
-        +uint64_t tensor_offset
-    }
-
-    GeminiFS "1" --> "1" GPUFileManager
-    GeminiFS "1" --> "1..*" GPUController
-    GPUController "1" --> "0..*" NVMeController
-    GPUController "1" --> "1" GPUMemoryMapper
-    GPUController "1" --> "0..*" geminifs_dma
-    GPUMemoryMapper "1" --> "0..*" GPUHashEntry
-    NVMeController "1" --> "1" FileManager
-    GPUFileManager "1" --> "1" GPUController
-    geminifs_dma "1" --> "0..*" GranularitySliceGroup
-    GranularitySliceGroup "1" --> "0..*" PRPMappingEntry
-```
-
-### 3.2 Device-Side (GPU Kernel) Components
-
-```mermaid
-classDiagram
-    class NVMe_File {
-        +Controller* ctrl
-        +geminiFS_hdr* hdr
-        +QueueAcquireHelper* queue_acquire_helper
-        +size_t nvme_page_size
-        +read_in(prp1, prp2, offset, nbytes)
-        +write_out(prp1, prp2, offset, nbytes)
-        -get_nvme_offset(va) uint64_t
-        -nvme_xfer(offset, prp1, prp2, nbytes, is_read)
-    }
-
-    class QueueAcquireHelper {
-        +acquire_queue() int
-        +issue_nvme_cmd(qp, prp1, prp2, ...)
-        +issue_nvme_cmd_sgl(qp, sgl_addr, ...)
-        +poll(qp, cid)
-    }
-
-    class QueuePair {
-        +nvm_queue_t sq
-        +nvm_queue_t cq
-        +uint32_t nvmNamespace
-    }
-
-    class BatchIoEntry {
-        +GPUIoContext* d_ioctxs
-        +uint32_t capacity
-        +uint32_t used
-    }
-
-    class GPUIoContext {
-        +NVMeFilesSpan nvme_files
-        +PRPMappingEntry* prp_entry
-        +size_t file_offset
-        +uint32_t prp_idx
-    }
-
-    NVMe_File --> QueueAcquireHelper : acquires queue
-    QueueAcquireHelper --> QueuePair : submits cmd
-    BatchIoEntry "1" --> "0..512" GPUIoContext
-    GPUIoContext --> NVMe_File : references
-    GPUIoContext --> PRPMappingEntry : references
-```
-
----
-
-## 4. Data Flow: Tensor Registration
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant GFS as GeminiFS
-    participant GC as GPUController
-    participant Mapper as GPUMemoryMapper
-    participant NVMe as NVMeController (first)
-
-    App->>GFS: geminifs_register_tensor_with_gpu(tensor, granularity)
-    GFS->>GC: registerTensorMemory(tensor, granularity)
-    GC->>GC: validateTensor(tensor)
-    GC->>GC: createDMAContext(tensor, granularity)
-    note over GC: calls libnvm to map GPU pages → DMA bus addresses
-    GC->>NVMe: getDeviceDma(ctrl, gpu_ptr, size, device_id)
-    NVMe-->>GC: DmaPtr (ioaddrs[])
-    GC->>GC: performDMASlicing(dma_ctx, tensor_size, granularity)
-    note over GC: Creates GranularitySliceGroup[] with SubSliceInfo[]
-    GC->>GC: initializePRPEntries(dma_ctx)
-    note over GC: Builds PRPMappingEntry per sub-slice (SINGLE/DUAL/LIST)
-    GC->>GC: initializePRPList(dma_ctxs)
-    note over GC: cudaMalloc PRP list pages; cudaMemcpy host→device
-    GC->>Mapper: addBatchMappings(tensor_ptr, size, prp_entries, gpu_buf)
-    note over Mapper: Stores GPUHashEntry with PRPMappingEntrySpan (device pointer)
-    Mapper-->>GC: true
-    GC-->>GFS: true
-    GFS-->>App: success
-```
-
----
-
-## 5. Data Flow: Batched I/O Submission
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant GFS as GeminiFS
-    participant GFM as GPUFileManager
-    participant Mapper as GPUMemoryMapper
-    participant Pool as BatchIoPool
-    participant Kern as GPU Kernel
-
-    App->>GFS: geminifs_batched_read(k_caches, file_ids, layer_idx, stream)
-    GFS->>GFM: getNVMeFilesSpanById(file_id)
-    GFM-->>GFS: NVMeFilesSpan (device ptr to NVMe_File*)
-    GFS->>Mapper: lookupMappings(tensor_ptr)
-    Mapper-->>GFS: GPUHashEntry → PRPMappingEntrySpan
-    GFS->>GFM: allocateIoContexts(count)
-    GFM->>Pool: acquire(count)
-    Pool-->>GFM: BatchIoEntry*
-    GFM-->>GFS: BatchIoEntry*
-    GFS->>GFS: fill_ctx() → GPUIoContext[] per tensor per PRP entry
-    GFS->>GFS: cudaMemcpyAsync(BatchIoEntry::d_ioctxs, ctx_array, stream)
-    GFS->>Kern: nvme_batch_xfer_kernel<<<blocks, 32, stream>>>(entry, size, count, is_read)
-    note over Kern: Each thread handles one GPUIoContext
-    Kern->>Kern: ctx = d_ioctxs[tid]
-    Kern->>Kern: nvme_file = ctx.nvme_files[0]
-    Kern->>Kern: prp = ctx.prp_entry[ctx.prp_idx]
-    Kern->>Kern: nvme_file->nvme_xfer(ctx.file_offset, prp, is_read)
-    note over Kern: QueueAcquireHelper::acquire_queue() → issue_nvme_cmd() → poll()
-    GFS->>GFS: cudaLaunchHostFunc(stream, release_ioctx, entry_list)
-    note over GFS: async callback returns BatchIoEntry to pool after kernel completes
-    GFS-->>App: cudaStream_t (async)
-```
-
----
-
-## 6. Initialization Flow
-
-```mermaid
-flowchart TD
-    A([GeminiFS::init]) --> B[Phase 1: System Config\nauto_configure_fd_limits\ncudaGetDevice]
-    B --> C[Phase 2: Config Parse\nparse_system_config\nparse_and_setup_controllers]
-    C --> D[Create GPUController\nGPUMemoryMapper::initialize]
-    D --> E[For each NVMe param:\nNVMeController constructor]
-    E --> F[open_single_controller\nPCI bind via ioctl]
-    F --> G[cudaMalloc QueueAcquireHelper\ninit_queue_acquire_helper_kernel]
-    G --> H[FileManager constructor\nload or create log file]
-    H --> I[gpu_controller→addNVMeController]
-    I --> J[Phase 3: GPUFileManager\ninitializeLogFile\nloadFromFile\nBatchIoPool alloc 64K entries]
-    J --> K{reset flag?}
-    K -->|Yes| L[deleteGPUFile for all\nFileManager::deleteFile]
-    K -->|No| M[Phase 4: Check existing files\nif files_to_create > 0]
-    L --> M
-    M --> N[createGPUFiles parallel per NVMe:\nhost_create_geminifs_file\nhost_refine_nvmeofst fiemap ioctl\ndevice_file_create_managed\ncudaMalloc NVMe_File on GPU]
-    N --> O[Assemble GPUFileDesc\nwrite to log slot]
-    O --> P[Phase 5: Open all GPU files\ninitGPUFile per id]
-    P --> Q([Ready])
-
-    style A fill:#1a3a5c,color:#fff
-    style Q fill:#1a5c2d,color:#fff
-    style F fill:#4a3a1a,color:#fff
-    style G fill:#4a3a1a,color:#fff
-```
-
----
-
-## 7. PRP/SGL Memory Mapping Model
-
-```mermaid
-graph LR
-    T[GPU Tensor\n2GB device memory]
-
-    subgraph DMA["geminifs_dma"]
-        IO[ioaddrs[]\nDMA bus addresses\nper 4KB page]
-        G0[GranularitySliceGroup 0\ngranularity=256MB]
-        G1[GranularitySliceGroup 1\ngranularity=256MB]
-        Gn[...]
-    end
-
-    subgraph Slices["Sub-slices (per granularity)"]
-        S00[SubSlice 0: offset=0, size=128KB]
-        S01[SubSlice 1: offset=128KB, size=128KB]
-        S0n[...]
-    end
-
-    subgraph PRP["PRPMappingEntry (per sub-slice)"]
-        P1["SINGLE PAGE\ntransfer_type=0\nprp1=ioaddr[i]\nprp2=0\ndata_length≤4KB"]
-        P2["DUAL PAGE\ntransfer_type=1\nprp1=ioaddr[i]\nprp2=ioaddr[i+1]\ndata_length≤8KB"]
-        P3["PRP LIST\ntransfer_type=2\nprp1=ioaddr[i]\nprp2=list_page_ioaddr\ndata_length>8KB"]
-    end
-
-    subgraph PRPPage["PRP List Page (GPU memory, DMA-mapped)"]
-        L1[ioaddr[i+1]]
-        L2[ioaddr[i+2]]
-        Ln[...]
-        LT[type=PRP_TYPE_LIST]
-    end
-
-    T --> DMA
-    DMA --> Slices
-    G0 --> S00
-    G0 --> S01
-    G0 --> S0n
-    S00 --> P1
-    S01 --> P2
-    S0n --> P3
-    P3 --> PRPPage
-
-    style T fill:#1a3a5c,color:#fff
-    style PRP fill:#2d4a1a,color:#fff
-    style PRPPage fill:#4a2d1a,color:#fff
-```
-
----
-
-## 8. Component Dependency Graph
-
-Memory Layer and Device Manager are independent. The IO Engine depends on both: it needs DMA-mapped PRP entries (Memory Layer) and acquired NVMe queues (Device Manager) to issue I/O.
-
-```mermaid
-graph TD
-    App([Application / Framework])
-
-    subgraph API["API Layer"]
-        GFS[GeminiFS]
-        CFG[parse_system_config]
-    end
-
-    subgraph Runtime["Core Runtime"]
-        GCR[GPUControllerRegistry\nSingleton]
-    end
-
-    subgraph MemLayer["Memory Layer (independent)"]
-        GC_MEM[GPUController\nmemory side]
-        GMap[GPUMemoryMapper]
-        GDMA[geminifs_dma\n+ GranularitySliceGroup]
-        PRP[PRPMappingEntry]
-    end
-
-    subgraph CtrlPlane["Device Manager (independent)"]
-        GC_CTRL[GPUController\nstorage side]
-        NC[NVMeController]
-        FM[FileManager\nper NVMe]
-        GFM[GPUFileManager]
-    end
-
-    subgraph DataPlane["IO Engine (Device-side)"]
-        KER["nvme_*_kernel\nGPU kernels"]
-        NF[NVMe_File\ndevice class]
-        QH[QueueAcquireHelper\ndevice class]
-    end
-
-    subgraph Backend["Backend: local_nvme"]
-        LIBNVM[libnvm\nuser-space NVMe lib]
-        SNVME[snvme\nkernel module]
-    end
-
-    App --> GFS
-    GFS --> CFG
-    GFS --> GCR
-    GFS --> GC_MEM
-    GFS --> GC_CTRL
-    GFS --> GFM
-
-    GC_MEM --> GMap
-    GC_MEM --> GDMA
-    GDMA --> PRP
-    GMap --> PRP
-
-    GC_CTRL --> NC
-    NC --> FM
-    NC --> LIBNVM
-    GFM --> GC_CTRL
-    GFM --> FM
-
-    GC_MEM --> KER
-    GC_CTRL --> KER
-    GFM --> KER
-    KER --> NF
-    NF --> QH
-    QH --> LIBNVM
-    LIBNVM --> SNVME
-
-    style API fill:#1a3a5c,color:#fff,stroke:#4a9eff
-    style Runtime fill:#2d2d1a,color:#fff,stroke:#aaaa4a
-    style MemLayer fill:#1a4a2d,color:#fff,stroke:#4aff9a
-    style CtrlPlane fill:#2d1a4a,color:#fff,stroke:#9a4aff
-    style DataPlane fill:#1a2d4a,color:#fff,stroke:#4a7aff
-    style Backend fill:#3a1a1a,color:#fff,stroke:#ff4a4a
-```
-
----
-
-## 9. Refactoring Gap Analysis
-
-```mermaid
-graph LR
-    subgraph Current["Current State"]
-        direction TB
-        C1[GeminiFS\nmonolithic orchestrator\n⚠️ init混合所有阶段]
-        C2[GPUController\nMemory + Storage混合\n⚠️ 应拆分为两个类]
-        C3[NVMeController\nControl + Data混合\n⚠️ device文件操作应独立]
-        C4[GPUFileManager\nFile管理 + IO池\n⚠️ BatchIoPool应独立]
-        C5[No Backend SPI\n❌ 直接调用libnvm]
-        C6[No Adapter Layer\n❌ 无LMCache/Mooncake]
-        C7[Split Config\n⚠️ YAML vs INI未统一]
-    end
-
-    subgraph Target["v0.1 Target"]
-        direction TB
-        T1[API Layer\n稳定公共接口]
-        T2[MemorySubsystem\n独立分配/注册/Region模型]
-        T3[ControlPlane\n专注拓扑/发现/租约]
-        T4[DataPlane\n纯提交/完成语义]
-        T5[BackendSPI\nBackendProvider接口]
-        T6[local_nvme Backend\nPRP/SGL实现]
-        T7[Adapters\nLMCache · Mooncake]
-        T8[Unified Config\n单一YAML格式]
-    end
-
-    C2 -.->|Phase 2: Extract| T2
-    C1 -.->|Phase 1: Define interfaces| T1
-    C3 -.->|Phase 3: Split| T3
-    C3 -.->|Phase 3: Split| T4
-    C5 -.->|Phase 4: Define SPI| T5
-    C5 -.->|Phase 5: Implement| T6
-    C6 -.->|Phase 6: Build| T7
-    C7 -.->|Phase 1 blocker| T8
-```
-
----
-
-## 10. Known Constraints and Non-Goals (v0.1)
-
-```mermaid
-mindmap
-  root((v0.1 Constraints))
-    NO Cooperative Submit
-      CPU and GPU must not access same queue simultaneously
-      Queue-sharing capability ≠ runtime ownership semantics
-      Future co-submit needs explicit version decision
-    Hardware Requirements
-      Linux 5.15.0 only
-      NVIDIA H100+ (sm_90)
-      CUDA 12.6+
-      BIOS: Above4G=ON, IOMMU=OFF
-    Kernel Module
-      snvme must be installed at system startup
-      Not ad-hoc runtime build
-      Formal support matrix required
-    Config
-      YAML (NVMeService) vs INI (libgeminifs)
-      Must unify before modularization
-    Naming
-      Do not hard-code "GeminiFS" in new abstractions
-      Runtime name may change in future versions
-    GPU File Persistence
-      NOT stable in v0.1
-      Must not be treated as reliable persistence contract
-```
-
----
-
-## 11. Directory Structure (Current → Target)
+Tutti (Italian for "all instruments together") is a **CPU/GPU companion
+storage software stack**: a unified storage runtime in which the CPU and
+GPU paths cooperate on top of a shared memory subsystem and a pluggable
+backend SPI.
+
+The core idea: **the CPU launches IO kernels, the GPU executes them.**
+The CPU prepares batch descriptors, stages them into GPU memory, and
+launches a GPU kernel that rings NVMe doorbells directly — bypassing the
+host CPU on the data path. This delivers GPU-direct storage access
+without requiring the CPU to mediate every IO.
+
+### 1.1 Design Goals
+
+| Goal | How |
+|------|-----|
+| GPU-direct NVMe access | Modified kernel module (`snvme`) + `libnvm` user library; GPU kernels write SQ entries and tap doorbells directly |
+| Batch IO throughput | One GPU kernel launch handles thousands of NVMe IOs; per-IO shard selection happens on-GPU |
+| Multi-device striping | A `GpuFile` spans up to 4 NVMe devices (shards); data is interleaved across them |
+| Pluggable backends | `IBackendProvider` SPI isolates the transport (NVMe today, RDMA/GDS future) from upper layers |
+| Two bootstrap modes | Direct (process owns NVMe) or service-client (daemon owns NVMe, process attaches) |
+
+### 1.2 Current Scope (v0.1)
+
+- **One backend**: `local_nvme` (modified snvme kernel module + libnvm + NVMeService daemon)
+- **One accelerator vendor**: NVIDIA CUDA
+- **One filesystem path**: ext4 + FIEMAP extent extraction
+- **Two submission modes**: `BATCH_GPU_STREAM` (GPU submits) and `BATCH_CPU_SYNC` (CPU submits, blocks)
+- **No cooperative submit** (interface defined, not implemented)
+
+## 2. Layered Architecture
+
+The codebase is organized into the following layers. Each layer depends
+only on the layer(s) below it and on shared type headers.
 
 ```
-Current (Historical Boundaries)          Target (v0.1 Direction)
-────────────────────────────────         ────────────────────────────────
-GeminiFS/                                GeminiFS/
-├── backends/local/                      ├── api/                    ← New
-│   ├── nvme/libnvm/        ✅           ├── runtime/               ← New
-│   ├── kernel_modules/snvme-5.15.0/ ✅   ├── memory/                ← Extract from libgeminifs
-│   └── NVMeService/        ✅           ├── device_manager/         ← New
-├── filesystems/ext4/                    ├── io_engine/            ← New
-│   └── libgeminifs/        ⚠️ Monolith  ├── backends/
-│       ├── include/                     │   └── local_nvme/        ← Move from backends/local
-│       ├── gpu_controller.cu            ├── adapters/              ← New (LMCache, Mooncake)
-│       ├── nvme_controller.cu           ├── doc/architecture/      ← This file
-│       ├── gpu_file_manager.cu          ├── examples/
-│       ├── geminifs.cu                  └── ...
-│       └── ...
-├── examples/               ✅
-├── doc/
-│   └── architecture/       ← This file
-└── ...
+┌─────────────────────────────────────────────────────────┐
+│                   Application / Adapter                   │
+│              (examples/, adapters/)                       │
+├─────────────────────────────────────────────────────────┤
+│                     Coordinator                           │
+│  (coordinator/) — owns one instance of every layer,       │
+│  sequences bring-up/tear-down, provides unified API       │
+├──────────────┬───────────────┬──────────────────────────┤
+│  io_engine   │   memory      │   device_manager          │
+│ (io_engine/) │  (memory/)    │ (device_manager/)         │
+│              │               │                           │
+│ IIoEngine    │ IMemorySub-   │ IDeviceRegistry           │
+│ IBackend-    │ system        │ ILeaseManager             │
+│  Provider    │ MemoryRegion  │ NvmeQueueGroup            │
+│              │               │                           │
+├──────────────┴───────────────┴──────────────────────────┤
+│              block_storage (block_storage/)               │
+│  IBlockStorage — GpuFile = N NvmeFile shards              │
+├─────────────────────────────────────────────────────────┤
+│              nvme_storage (nvme_storage/)                 │
+│  INvmeStorage — NvmeFile, FIEMAP extents, GPU handle,     │
+│  device-side submit_read_one / submit_write_one           │
+├─────────────────────────────────────────────────────────┤
+│              backends/local (backends/local/)             │
+│  kernel_modules/  — snvme (modified NVMe kernel module)   │
+│  nvme/libnvm/     — user-space NVMe queue library         │
+│  NVMeService/     — daemon for persistent device mount    │
+└─────────────────────────────────────────────────────────┘
 ```
 
----
+### 2.1 Layer Responsibilities
 
-*Generated from codebase analysis. Update this document when interfaces change.*
+#### Coordinator (`coordinator/`)
+
+The top-level orchestrator. Owns one instance of every layer below and
+sequences their bring-up / tear-down so application code never assembles
+the chain by hand.
+
+**Bring-up order:**
+```
+IDeviceRegistry          (device_manager)
+  → HostFsBackedNvmeStorage   (nvme_storage)
+    → HostFsBackedBlockStorage  (block_storage)
+      → HostDeviceMemorySubsystem (memory)
+        → LocalNvmeIoEngine        (io_engine)
+```
+
+**Key types**: `Coordinator`, `CoordinatorConfig`, `Device`, `CapabilitySet`, `Lease`
+
+**API surface**: file lifecycle (open/delete/batch), handle cache
+(id→handle resolution), memory (allocate/register/free), IO submission
+(submit_batch), durability (sync_file).
+
+#### IO Engine (`io_engine/`)
+
+Defines the IO submission interfaces and batch metadata. Two levels:
+
+- **`IIoEngine`** — host-side entry point. `submit_batch()` takes a
+  vector of `NvmeBatchInputTensor` (tensor region + file handle +
+  offset), builds the batch on host, `cudaMemcpyAsync` to GPU, launches
+  the transfer kernel, and synchronizes.
+
+- **`IBackendProvider`** — backend SPI. Defines four submission modes
+  (`BATCH_GPU_STREAM`, `BATCH_CPU_SYNC`, `BATCH_CPU_ASYNC`, `COOP`),
+  descriptor preparation, queue acquisition, and lifecycle hooks. Each
+  backend implements this interface.
+
+**Key types**: `IIoEngine`, `IBackendProvider`, `IQueue`, `IQueueProvider`,
+`BufferDescriptor` (tagged union: NVMe/RDMA), `IORequest`, `IORequestBatch`,
+`IOCompletion`, `IOFuture`, `CoopIOChannel`, `IOSubmitMode`, `BackendType`
+
+**GPU dispatch model**: GPU kernels are NOT polymorphic — there is no
+vtable on GPU. The host picks the backend and calls
+`launch_batch_gpu_stream()`; the backend's host-side method launches its
+own `__global__` kernel directly. GPU code reads queue ring pointers
+(`QueueDesc::sq.dev_ptr` / `cq.dev_ptr`) and calls backend-private
+device-side helpers.
+
+#### Memory (`memory/`)
+
+The single source of truth for "the runtime knows about this piece of
+memory" and for translating tensors into NVMe-readable address
+descriptors (PRP today, SGL when supported).
+
+**Responsibilities:**
+- Allocate host / pinned-host / device / managed memory
+- Register caller-allocated buffers (including external: CUDA IPC, shm, app-managed)
+- DMA-map registered buffers to NVMe controllers (via libnvm `nvm_dma_map_data_device`)
+- Pre-compute IO-slice tables: split tensors into `granularity`-byte slices, each fanned into NVMe-sized sub-IOs with pre-built PRP entries
+- Two-tier PRP-page cache (GPU-resident L1 + host-pinned L2) to avoid per-tensor allocation waste
+
+**Key types**: `IMemorySubsystem`, `HostDeviceMemorySubsystem`,
+`MemoryRegion`, `MemoryKind`, `TensorRegistrationSpec`, `IoSliceView`,
+`AddressDescriptor`, `DescriptorFormat`, `PrpPageCache`
+
+**Cluster-wide invariant**: The descriptor format (PRP vs SGL) is frozen
+at bootstrap. Under IOMMU=pt + bare metal, GPU physical pages have
+controller-agnostic PCI bus addresses, so one PRP buffer + one descriptor
+blob serve every cluster-bound NVMe controller.
+
+#### Device Manager (`device_manager/`)
+
+Cross-process device fleet management. Discovers, registers, and leases
+storage devices.
+
+**Responsibilities:**
+- Device discovery and registry (`IDeviceRegistry`)
+- Two implementations: `LocalNvmeDirectRegistry` (process owns NVMe) and `NvmeServiceBackedRegistry` (daemon owns, process attaches)
+- GPU-resident NVMe queue pool (`NvmeQueueGroup`): creates N user-queue pairs, stages `QueuePair[]` on GPU
+- Lease lifecycle (`ILeaseManager`): heartbeat-managed resource tokens for multi-process sharing
+
+**Key types**: `IDeviceRegistry`, `LocalNvmeDevice`, `NvmeQueueGroup`,
+`ILeaseManager`, `LocalNvmeDirectRegistry`, `NvmeServiceBackedRegistry`
+
+#### Block Storage (`block_storage/`)
+
+Owns the "GpuFile" abstraction: a named logical container whose data
+plane is split across N NvmeFile shards (one per device, up to
+`kGpuFileMaxShards=4`).
+
+**Responsibilities:**
+- GpuFile directory (create/open/delete, batch variants)
+- Metadata persistence (`gpu_file_log.bin` per device)
+- Handle acquisition: brings all N shard NvmeFiles to GPU together, produces `GpuFileHandle` with `d_shards_dev` pointer table
+- Stripe resolution: `gpu_file_resolve()` maps a global byte offset to (shard index, shard-local offset)
+
+**Key types**: `IBlockStorage`, `GpuFile`, `GpuFileSpec`, `GpuFileHandle`
+
+**Data layout**: Data is interleaved across shards in `tensor_size`-byte
+units. For KV-cache: `num_shards=2` (K, V) or `4` (K_lo, K_hi, V_lo,
+V_hi); `tensor_size` = per-layer tensor size.
+
+#### NVMe Storage (`nvme_storage/`)
+
+The lowest storage abstraction above the raw backend. Owns named LBA
+ranges on top of NVMe namespaces.
+
+**Responsibilities:**
+- Mount host filesystem (ext4) on the snvme block device
+- Create files via `fallocate`, extract physical LBA extents via FIEMAP ioctl
+- Maintain persistent file directory (`PersistentFileLog`)
+- Provide host-side blocking IO (O_DIRECT pread/pwrite) for bootstrap/metadata/tests
+- Provide GPU-side device handle (`NvmeFileDeviceHandle`): a small POD in GPU memory carrying file extents + queue pool pointer
+- Device-side submit kernels: `submit_read_one` / `submit_write_one` (`__device__` functions that ring NVMe doorbells)
+- Two-tier handle cache (GPU-resident L1 + CPU-pinned L2) for millions of files
+
+**Key types**: `INvmeStorage`, `NvmeFile`, `NvmeFileDeviceHandle`,
+`LbaExtent`, `PersistentFileLog`
+
+**NvmeFileDeviceHandle design**: Inline 8 extents (common case: 1-3
+extents from unfragmented fallocate); overflow buffer for pathological
+fragmentation. Mirrors NVMe's PRP1/PRP2 + PRP-list pattern. ~200 bytes
+per file vs ~2 KiB naive — critical for LMCache-scale (millions of files).
+
+#### Backend: local (`backends/local/`)
+
+The reference (and currently only) backend implementation.
+
+- **`kernel_modules/`** — Modified Linux NVMe kernel module (`snvme`).
+  Patches the stock `nvme` driver to expose user-space queue creation
+  ioctls (`NVM_CREATE_QUEUE_GROUP`, `NVM_ADD_USER_QUEUE`) and GPU memory
+  DMA mapping (`NVM_MAP_DEVICE_MEMORY`). Two kernel versions supported:
+  5.15.0 and 5.4.241.
+
+- **`nvme/libnvm/`** — User-space C++ library wrapping the snvme
+  ioctls. Provides `nvm_ctrl_t` (controller handle), `nvm_dma_t` (DMA
+  mapping), `QueuePair` (SQ/CQ ring management), and the B3 bootstrap
+  path (`nvm_controller_init_b3`: chrdev_create + capability + bind +
+  probe).
+
+- **`NVMeService/`** — Daemon for persistent NVMe device mounting. Owns
+  chrdev/bind lifecycle, leases queue ranges to client processes via
+  gRPC, and reaps dead-client queues via PID-starttime tracking. Clients
+  attach via `nvm_ctrl_attach_client` and build their own user queues.
+
+## 3. Core Data Flow
+
+### 3.1 GPU-Submit Read Path (Primary High-Throughput Path)
+
+```
+Application                Coordinator              io_engine            GPU Kernel
+    │                           │                       │                    │
+    │ register_tensor(buf)      │                       │                    │
+    │──────────────────────────>│                       │                    │
+    │                           │ memory.register_tensor │                    │
+    │                           │  DMA-map to NVMe       │                    │
+    │                           │  build IO-slice table  │                    │
+    │                           │  admit PRP pages to L2 │                    │
+    │                           │                       │                    │
+    │ open_gpu_file(spec)       │                       │                    │
+    │──────────────────────────>│                       │                    │
+    │   GpuFile*                │ block_storage          │                    │
+    │<──────────────────────────│  .open (creates shards)│                    │
+    │                           │                       │                    │
+    │ handle_for(file_id, stream)│                      │                    │
+    │──────────────────────────>│                       │                    │
+    │   GpuFileHandle*          │ block_storage          │                    │
+    │<──────────────────────────│  .acquire_device_handle│                    │
+    │                           │  nvme_storage          │                    │
+    │                           │   .acquire (FIEMAP→GPU)│                    │
+    │                           │                       │                    │
+    │ submit_batch(inputs, READ, stream)                │                    │
+    │──────────────────────────>│                       │                    │
+    │                           │ io_engine.submit_batch │                    │
+    │                           │  build NvmeBatchEntry[]│                    │
+    │                           │  ensure_prp_pages (L2→L1)                   │
+    │                           │  cudaMemcpyAsync H2D   │                    │
+    │                           │  launch kernel ──────────────────────────>  │
+    │                           │                       │  per-thread:       │
+    │                           │                       │   gpu_file_resolve │
+    │                           │                       │   resolve_lba      │
+    │                           │                       │   acquire_queue    │
+    │                           │                       │   issue NVMe cmd   │
+    │                           │                       │   poll completion  │
+    │                           │  cudaStreamSynchronize │                    │
+    │<──────────────────────────│                       │                    │
+```
+
+**Key steps:**
+1. **Register tensor**: Memory layer DMA-maps the buffer to NVMe, pre-computes IO-slice table (per-slice PRP entries), admits PRP-list pages to L2 cache.
+2. **Open file**: Block storage creates NvmeFile shards (fallocate + FIEMAP), records in persistent log.
+3. **Acquire handle**: NVMe storage builds `NvmeFileDeviceHandle` (extents + queue pool ptr), cudaMalloc + cudaMemcpy to GPU. Cached in two-tier cache.
+4. **Submit batch**: IO engine flattens (tensor × sub-slice) → `NvmeBatchEntry[]`, ensures PRP pages are L1-resident, H2D copies entries, launches `nvme_batch_xfer_kernel`.
+5. **GPU kernel**: Each thread resolves its IO to (shard, LBA, PRP), acquires a queue, issues NVMe command, busy-polls completion.
+
+### 3.2 CPU-Submit Path
+
+CPU prepares descriptors and submits directly via `IQueue::enqueue_cpu`,
+then polls `IQueue::poll_cq_cpu`. No GPU kernel involved. Used for
+bootstrap, metadata, and testing.
+
+## 4. Key Abstractions
+
+### 4.1 Device
+
+```cpp
+struct Device {
+    int32_t      device_id;        // dense index inside the Runtime
+    BackendType  backend_type;     // LOCAL_NVME | RDMA | GDS
+    std::string  pci_addr;         // PCI BDF / IB GUID / ...
+    std::string  display_name;
+    CapabilitySet capabilities;
+    void* backend_private;         // backend-specific (e.g. LocalNvmeDevice*)
+};
+```
+
+A `Device` is the runtime-visible identity of one storage resource.
+Upper layers refer to devices via `device_id` and `Device*` handles
+obtained from the registry. The `backend_private` field lets backends
+stash a private handle (e.g. `LocalNvmeDevice*`) to navigate back to
+concrete state.
+
+> **Note**: There are currently two `device.h` headers with the same
+> include guard — one in `coordinator/include/` (used) and one in
+> `runtime/include/` (unused, has `backend`/`queues` hooks). This is a
+> known issue to be resolved in the restructuring.
+
+### 4.2 MemoryRegion
+
+```cpp
+struct MemoryRegion {
+    uint64_t   region_id;
+    MemoryKind kind;              // HOST | PINNED_HOST | DEVICE | MANAGED | EXTERNAL
+    int        cuda_device;
+    void*    host_ptr;            // CPU-visible base
+    void*    device_ptr;          // GPU-visible base
+    uint64_t size;
+    ExternalMemorySpec external;  // for EXTERNAL kind
+    RegistrationMetadata registration;  // DMA ioaddrs, RDMA keys
+};
+```
+
+The runtime-internal handle for registered memory. Every layer that
+needs to refer to memory carries `const MemoryRegion*` instead of raw
+pointers + DMA addresses. Ownership stays with the application;
+`unregister()` drops metadata but leaves the buffer untouched.
+
+### 4.3 GpuFile / NvmeFile
+
+- **`NvmeFile`**: One file on one NVMe device. Metadata-only (no held
+  fd). Carries FIEMAP-extracted `LbaExtent[]` (physical LBAs).
+
+- **`GpuFile`**: A logical container spanning N `NvmeFile` shards. Data
+  is interleaved in `tensor_size`-byte units across shards.
+
+- **`GpuFileHandle`**: Acquired view — every shard has a
+  `NvmeFileDeviceHandle*` in GPU memory, plus a GPU-resident pointer
+  table `d_shards_dev`.
+
+### 4.4 BufferDescriptor (Tagged Union)
+
+```cpp
+struct BufferDescriptor {
+    BackendType backend_type;     // discriminator
+    union {
+        NVMeBufferDesc nvme;      // PRP/SGL addressing
+        RDMABufferDesc rdma;      // remote/local addr + rkey/lkey
+        uint8_t raw[48];          // 48-byte budget for future backends
+    };
+};
+```
+
+Backend-neutral wrapper for per-slice IO metadata. Filled by
+`IBackendProvider::prepare_descriptors()` during tensor registration.
+Device-side kernels read the union member matching their backend.
+
+### 4.5 CapabilitySet
+
+Bitmask advertising what a Device supports:
+- **Submission modes** (bits 0-15): `CAP_SUBMIT_BATCH_GPU_STREAM`, `CAP_SUBMIT_BATCH_CPU_SYNC`, `CAP_SUBMIT_COOP_*`, etc.
+- **Memory sources** (bits 16-23): `CAP_MEM_HOST_REGISTER`, `CAP_MEM_DEVICE_REGISTER`, `CAP_MEM_EXTERNAL_*`, etc.
+- **Transport/topology** (bits 24-31): `CAP_TOPO_GPUDIRECT_DMA`, `CAP_TOPO_GPUDIRECT_RDMA`, `CAP_TOPO_NUMA_AWARE`
+
+## 5. Bootstrap Modes
+
+### 5.1 IN_PROCESS (Direct)
+
+```
+Application Process
+  ├── LocalNvmeDirectRegistry::Open()
+  │     nvm_controller_init_b3(pci_addr)  // chrdev_create + bind + probe
+  │     NvmeQueueGroup(ctrl, ...)         // create user queues, stage on GPU
+  │     → Device { backend_private = LocalNvmeDevice* }
+  ├── HostFsBackedNvmeStorage::bootstrap(devices)
+  │     mount ext4 on /dev/snvmesdX
+  │     load PersistentFileLog
+  ├── HostFsBackedBlockStorage::bootstrap(storage, devices)
+  │     load gpu_file_log.bin
+  ├── HostDeviceMemorySubsystem::bind_devices(devices)
+  │     cache cluster caps (page_size, min MDTS)
+  └── LocalNvmeIoEngine(mem, max_entries)
+```
+
+### 5.2 SERVICE_CLIENT (Daemon-Attached)
+
+```
+NVMeService Daemon (started beforehand)
+  ├── owns chrdev_create + bind for every NVMe
+  ├── ListDevices() → fleet
+  └── Connect(client) → lease queue range, heartbeat-managed
+
+Application Process
+  ├── NvmeServiceBackedRegistry::Open()
+  │     gRPC connect to daemon
+  │     ListDevices → pick daemon_device_ids
+  │     Connect per device → session + lease
+  │     nvm_ctrl_attach_client(fd)       // attach to daemon-owned ctrl
+  │     NvmeQueueGroup(ctrl, ...)        // client builds own user queues
+  │     → Device { backend_private = LocalNvmeDevice* }
+  └── (rest identical to IN_PROCESS)
+```
+
+Key difference: the daemon owns chrdev/bind; the client only attaches.
+No GPU memory or queue handles cross the process boundary. The daemon
+brokers the lease; the client runs `nvm_create_group` +
+`nvm_add_user_queue` against its own attach_client fd.
+
+## 6. GPU-Side IO Submission
+
+The GPU kernel is the heart of the data path. It is NOT polymorphic —
+there is no vtable on GPU.
+
+### 6.1 Kernel Flow (`nvme_batch_xfer_kernel`)
+
+```
+For each thread tid (one per NvmeBatchEntry):
+  1. Load entry = d_entries[tid]
+  2. gpu_file_resolve(tensor_size, num_shards, file_offset, &shard_idx, &shard_off)
+  3. shard_handle = entry.shards[shard_idx]   // NvmeFileDeviceHandle*
+  4. For each sub-slice i in [0, entry.num_sub_slices):
+       prp = entry.prp_entry[entry.prp_idx + i]
+       resolve_lba(shard_handle, shard_off + i*io_size, io_size, &lba, &n_blocks)
+       qidx = QueueAcquireHelper::acquire_queue(num_d_qps)
+       qp = &shard_handle->d_qps[qidx]
+       QueueAcquireHelper::issue_nvme_cmd(qp, prp.prp1, prp.prp2, n_blocks, lba, opcode, &cid)
+       QueueAcquireHelper::poll(qp, cid)   // busy-poll completion
+```
+
+### 6.2 Queue Acquisition
+
+`QueueAcquireHelper` (device-side) provides:
+- `acquire_queue(num_d_qps)`: atomically claims a queue index (round-robin with atomic counter)
+- `issue_nvme_cmd(qp, prp1, prp2, n_blocks, lba, opcode, &cid)`: writes SQE, advances SQ tail, rings doorbell
+- `poll(qp, cid)`: busy-polls CQ for matching command ID
+
+### 6.3 LBA Resolution
+
+`resolve_lba()` walks `NvmeFileDeviceHandle::extents[]` (inline 8 +
+overflow) to map (logical_offset, nbytes) → (starting_lba, n_blocks).
+Rejects requests spanning multiple extents (R7 pre-splits per-extent
+before calling submit).
+
+## 7. Memory Model
+
+### 7.1 Memory Kinds
+
+| Kind | Source | GPU-visible | NVMe-DMA-mappable |
+|------|--------|-------------|-------------------|
+| `HOST` | malloc/new | No | Via nvm_dma_map_data_host |
+| `PINNED_HOST` | cudaMallocHost | Yes (cudaHostGetDevicePointer) | Yes |
+| `DEVICE` | cudaMalloc | Yes | Via nvm_dma_map_data_device |
+| `MANAGED` | cudaMallocManaged | Yes (unified VA) | Yes |
+| `EXTERNAL` | App-supplied (IPC/shm/slab) | Per ExternalMemorySpec | Per source |
+
+### 7.2 IO-Slice Table (R7)
+
+At `register_tensor()` time, the memory layer pre-computes:
+1. Split tensor into `granularity`-byte slices
+2. Each slice fans into `ceil(granularity / effective_io)` sub-IOs, where `effective_io = min(granularity, min_mdts)`
+3. Each sub-IO gets a pre-built `AddressDescriptor` (prp1, prp2, data_length)
+4. Upload the entire descriptor blob to GPU memory
+5. Build PRP-list pages (when sub-IO needs > 2 pages) — cached in two-tier PRP page cache
+
+The IO engine looks up slices in O(log N) via `lookup_io_slice()` instead
+of recomputing PRPs on the hot path.
+
+### 7.3 Two-Tier Handle Cache
+
+For LMCache-scale workloads (millions of files), holding every file's
+GPU handle in GPU memory is infeasible. The cache has two tiers:
+
+- **L1 (GPU-resident, DMA-mapped)**: Small working set. Sized by
+  `handle_l1_gpu_budget_bytes` (default 512 MiB). Eviction = downgrade
+  to L2 (content preserved, not deleted).
+
+- **L2 (CPU-pinned)**: Large. Sized by `handle_l2_host_budget_bytes`
+  (default 2 GiB ≈ 11M files). Every touched file's built template
+  lives here. L1→L2 promotion is a plain memcpy, never re-walks FIEMAP.
+
+## 8. Current Directory Structure
+
+```
+Tutti/
+├── coordinator/          # Top-level orchestrator + runtime nouns (Device, Lease, etc.)
+│   └── include/          #   coordinator.h, coordinator_config.h, device.h, capability_set.h, lease.h
+├── io_engine/            # IO submission SPI + batch metadata
+│   └── include/
+│       ├── local_nvme/   #   NVMe-specific: host_batch_builder, launch_batch, nvme_batch, io_engine impl
+│       ├── io_engine.h, backend_provider.h, buffer_descriptor.h, io_request.h
+│       ├── queue.h, queue_provider.h, io_future.h, coop_channel.h
+│       └── io_submit_mode.h, backend_type.h
+├── memory/               # Memory subsystem: registration, DMA mapping, PRP/SGL, IO-slice tables
+│   └── include/          #   memory_subsystem.h, memory_region.h, host_device_memory_subsystem.h, ...
+├── device_manager/       # Device discovery, registry, lease, GPU queue pool
+│   └── include/          #   device_registry.h, local_nvme_device.h, nvme_queue_group.h, lease_manager.h, ...
+├── block_storage/        # GpuFile abstraction (multi-shard), directory, handle cache
+│   └── include/          #   block_storage.h, gpu_file_resolve.h, ...
+├── nvme_storage/         # NvmeFile, FIEMAP extents, GPU device handle, device-side submit kernels
+│   └── include/          #   nvme_storage.h, nvme_file.h, nvme_file_device_handle.h, nvme_storage_device.cuh, ...
+├── backends/
+│   └── local/            # The local_nvme backend
+│       ├── kernel_modules/  # snvme (modified NVMe kernel module, 2 kernel versions)
+│       ├── nvme/libnvm/     # User-space NVMe queue library
+│       └── NVMeService/     # Daemon for persistent device mounting
+├── runtime/              # (Largely unused — only device.h + capability_set.h, duplicated from coordinator/)
+├── adapters/             # Framework integration adapters (LMCache, Mooncake, ...)
+├── examples/             # Smoke tests and examples
+├── scripts/              # Setup and bind scripts
+├── doc/                  # Documentation
+├── CMakeLists.txt
+├── sys_config.yaml
+├── Roadmap.md
+└── README.md
+```
+
+## 9. Known Architecture Issues (Current vs Target)
+
+The current codebase does not yet match the `Roadmap.md` v0.1 target
+architecture. Main gaps (with resolution status):
+
+1. **~~`runtime/` was essentially empty~~** — RESOLVED. The `runtime/`
+   directory has been deleted. Runtime nouns (`Device`, `CapabilitySet`,
+   `Lease`) stay in `coordinator/include/` as the canonical home.
+
+2. **No `filesystems/` layer.** FIEMAP extent extraction is baked into
+   `nvme_storage`, making it impossible to pair the same NVMe backend
+   with a different namespace resolver (e.g. raw block range, custom
+   on-device layout, distributed FS client).
+   → Resolution: [Phase 2](../refactor/restructuring-plan.md#phase-2)
+
+3. **`io_engine`'s `IIoEngine` is NVMe-specific.** It takes
+   `NvmeBatchInputTensor` directly, not the generic
+   `BufferDescriptorBatch` + `IORequestBatch` defined in the SPI. The
+   generic SPI (`IBackendProvider`) exists but is not yet wired into
+   the runtime — `LocalNvmeIoEngine` bypasses it.
+   → Resolution: [Phase 4](../refactor/restructuring-plan.md#phase-4)
+
+4. **CUDA is hardcoded throughout.** `cuda_runtime.h` appears in
+   coordinator, io_engine, memory, and device_manager public headers.
+   `cudaStream_t`, `cudaMalloc`, `cudaFree` are used directly in
+   interfaces. There is no accelerator abstraction layer.
+   → Resolution: [Phase 1](../refactor/restructuring-plan.md#phase-1)
+
+5. **libnvm leaks into non-backend headers.** `nvm_types.h` /
+   `nvm_ctrl_t` / `nvm_dma_t` appear in `memory/` and
+   `device_manager/` headers, not just in `backends/local/`.
+   → Resolution: [Phase 3](../refactor/restructuring-plan.md#phase-3)
+
+6. **Kernel module versioning is ad-hoc.** Two directory copies
+   (`snvme-5.15.0-public`, `snvme-5.4.241-1-tlinux4-0017`) with no
+   build-time version selection or DKMS strategy.
+   → Resolution: [Phase 6](../refactor/restructuring-plan.md#phase-6)
+
+7. **File is the only storage abstraction.** No `StorageTarget` type;
+   can't do raw NVMe or RDMA without files.
+   → Resolution: [Phase 5](../refactor/restructuring-plan.md#phase-5)
+
+These issues and their resolution are addressed in the
+[Refactoring Plan](../refactor/restructuring-plan.md) and related design
+documents ([gpu-abstraction](../design/gpu-abstraction.md),
+[kernel-portability](../design/kernel-portability.md),
+[storage-extensibility](../design/storage-extensibility.md)).
