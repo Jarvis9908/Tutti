@@ -90,7 +90,6 @@ static int curr_ctrls = 0;
 // static uint64_t gpu_info_table[64];
 // static uint64_t nvme_info_table[64];
 
-struct nvme_gpu_map **snvme;
 int nvme_num;
 int gpu_num;
 /*
@@ -216,13 +215,6 @@ struct nvme_dev {
 	unsigned int nr_allocated_queues;
 	unsigned int nr_write_queues;
 	unsigned int nr_poll_queues;
-	unsigned int nr_user_allocated_queues;
-	unsigned int nr_user_allocated_cq;
-	unsigned int nr_user_use_cq;
-	unsigned int nr_user_allocated_sq;
-	unsigned int nr_user_use_sq;
-	unsigned int use_user_allocated;
-	unsigned int queue_on_host;
 	bool attrs_added;
 	/*
 	 * B3 queue-budget fields, copied from ctrl->setup at nvme_probe
@@ -1766,66 +1758,6 @@ release_cq:
 	return result;
 }
 
-static int nvme_create_user_queue(struct nvme_dev *dev , int uqid,int qid)
-{
-
-	int result;
-
-
-	struct pci_dev *pdev = to_pci_dev(dev->dev);
-	struct map* q_map; 
-	struct list* list;
-		
-	if(dev->queue_on_host)
-		list = &host_list;
-	else
-		list = &device_queue_list;
-	/*
-	 * A queue's vector matches the queue identifier unless the controller
-	 * has only one vector available.
-	 */
-	q_map = map_find_by_pci_dev_and_idx(list,pdev,uqid,1);
-	if(q_map==NULL)
-	{
-		printk("map_find_by_pci_dev_and_idx cq error!\n");
-		return -1;
-	}
-	result = adapter_alloc_cq_user(dev, q_map,qid);
-	if (result)
-		return result;
-
-	q_map = map_find_by_pci_dev_and_idx(list,pdev,uqid,0);
-	if(q_map==NULL)
-	{
-		printk("map_find_by_pci_dev_and_idx sq error!\n");
-		result = -1;
-		goto release_cq;
-	}
-	// printk("adapter_alloc_sq qid is %d\n",qid);
-	result = adapter_alloc_sq_user(dev, q_map,qid);
-	if (result < 0)
-		return result;
-	if (result)
-		goto release_cq;
-
-	result = nvme_setup_io_queues_trylock(dev);
-	if (result)
-		return result;
-	// nvme_init_queue(nvmeq, qid);
-	dev->online_user_queues++;
-	wmb(); /* ensure the first interrupt sees the initialization */
-	mutex_unlock(&dev->shutdown_lock);
-
-	return result;
-
-	dev->online_user_queues--;
-	mutex_unlock(&dev->shutdown_lock);
-	adapter_delete_sq(dev, qid);
-release_cq:
-	adapter_delete_cq(dev, qid);
-	return result;
-}
-
 static const struct blk_mq_ops nvme_mq_admin_ops = {
 	.queue_rq	= nvme_queue_rq,
 	.complete	= nvme_pci_complete_rq,
@@ -1968,37 +1900,6 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 
 	set_bit(NVMEQ_ENABLED, &nvmeq->flags);
 	return result;
-}
-
-static int nvme_create_io_queues_mix(struct nvme_dev *dev)
-{
-	unsigned i;
-	int ret = 0;
-	int k_q_max_id;
-
-	int count;
-	/*admin cq sq, rw q, polled queue  */
-
-	k_q_max_id = dev->max_qid + dev->nr_user_use_cq;
-
-	printk("nvme_create_io_queues_mix k_q_max_id is %d, online_queues is %d\n",k_q_max_id,dev->online_queues);
-
-
-	count = 0;
-	dev->user_start_qid = dev->online_queues;
-	for (i = dev->online_queues; i <= k_q_max_id; i++) {
-		ret = nvme_create_user_queue(dev,count,i);
-		if (ret)
-			break;
-		count++;
-	}
-	/*
-	 * Ignore failing Create SQ/CQ commands, we can continue with less
-	 * than the desired amount of queues, and even a controller without
-	 * I/O queues can still be used to issue admin commands.  This might
-	 * be useful to upgrade a buggy firmware for example.
-	 */
-	return ret >= 0 ? 0 : ret;
 }
 
 static int nvme_create_io_queues(struct nvme_dev *dev)
@@ -2480,7 +2381,6 @@ static int s_nvme_setup_io_queues(struct nvme_dev *dev)
 	unsigned int nr_io_queues;
 	unsigned long size;
 	int result;
-	unsigned int expect_num;
 	/*
 	 * Sample the module parameters once at reset time so that we have
 	 * stable values to work with.
@@ -2497,13 +2397,7 @@ static int s_nvme_setup_io_queues(struct nvme_dev *dev)
 	}
 
 	nr_io_queues = dev->nr_allocated_queues - 1;
-	// To add the user_allocated_queues to the total num of queue 
-	if(dev->use_user_allocated)
-	{
-		expect_num = dev->nr_user_allocated_cq + nr_io_queues;
-		nr_io_queues += dev->nr_user_allocated_cq;
-	}
-	
+
 	result = snvme_set_queue_count(&dev->ctrl, &nr_io_queues);
 
 	/*
@@ -2511,36 +2405,13 @@ static int s_nvme_setup_io_queues(struct nvme_dev *dev)
 	 * is the authoritative bound for legal QID values used by
 	 * NVM_ADD_USER_QUEUE; the user QID pool will be
 	 * [online_queues..ctrl_max_io_queues].  Captured BEFORE any
-	 * downstream code mutates nr_io_queues (the cap-shrink below,
-	 * or the use_user_allocated reconciliation further down) so
-	 * the pool sizer always sees the controller's real grant --
+	 * downstream code mutates nr_io_queues (the cap-shrink below)
+	 * so the pool sizer always sees the controller's real grant --
 	 * not whatever value the kernel ends up consuming.
 	 */
 	if (result == 0)
 		dev->ctrl_max_io_queues = nr_io_queues;
 
-	if (dev->use_user_allocated){
-		if (nr_io_queues < dev->nr_allocated_queues - 1){
-			dev->use_user_allocated = 0;
-			printk("snvme_set_queue_count fail, can not allocate more ioqs\n");
-		} else if (nr_io_queues <= expect_num){	
-			// user allocted more than controller limit
-			if (dev->nr_user_allocated_cq > nr_io_queues - 1){
-				dev->use_user_allocated = 0;
-				printk("to many user queues\n");
-			} else{
-				dev->nr_allocated_queues = nr_io_queues - dev->nr_user_allocated_cq;
-				nr_io_queues = dev->nr_allocated_queues - 1;
-				dev->nr_user_use_cq = dev->nr_user_allocated_cq;
-				dev->nr_user_use_sq = dev->nr_user_allocated_sq;
-				printk("force change nr_allocated_queues to %d\n",dev->nr_allocated_queues);
-				printk("snvme_set_queue_count succsee, but controller limit max, exp is %u, kernel is %u, user is %u\n",expect_num,nr_io_queues,dev->nr_user_use_cq);	
-			}
-		}
-	}
-
-
-	
 	if (result < 0)
 		return result;
 
@@ -2555,17 +2426,14 @@ static int s_nvme_setup_io_queues(struct nvme_dev *dev)
 	 * ctrl_max_io_queues] to remain unused by the kernel so
 	 * NVM_ADD_USER_QUEUE can claim them.
 	 *
-	 * Guarded so it only fires when (a) cap_kernel_ioq was set --
-	 * otherwise the comparison is a no-op anyway, AND (b) we are
-	 * not on the legacy use_user_allocated path which has its own
-	 * reconciliation block above with squeeze semantics.  Order
+	 * Guarded so it only fires when cap_kernel_ioq was set --
+	 * otherwise the comparison is a no-op anyway.  Order
 	 * matters: this must run AFTER nr_io_queues has been finalised
-	 * by snvme_set_queue_count + the use_user_allocated branch,
-	 * and BEFORE nvme_setup_irqs allocates IRQ vectors based on
-	 * the count (we want vectors sized for the kernel-only share,
-	 * not the full grant).
+	 * by snvme_set_queue_count, and BEFORE nvme_setup_irqs
+	 * allocates IRQ vectors based on the count (we want vectors
+	 * sized for the kernel-only share, not the full grant).
 	 */
-	if (dev->cap_kernel_ioq && !dev->use_user_allocated &&
+	if (dev->cap_kernel_ioq &&
 	    nr_io_queues > dev->cap_kernel_ioq) {
 		pr_info("snvme: capping kernel-side IOQ count from %u to %u "
 			"(ctrl_max=%u, user pool gets [%u..%u])\n",
@@ -2647,8 +2515,6 @@ static int s_nvme_setup_io_queues(struct nvme_dev *dev)
 
 	result = nvme_create_io_queues(dev);
 	printk("create io queue finish max_id is %d, online_queues is %d\n",dev->max_qid,dev->online_queues);
-	if(dev->use_user_allocated)
-		result = nvme_create_io_queues_mix(dev);
 
 	if (result || dev->online_queues < 2)
 		return result;
@@ -2662,11 +2528,10 @@ static int s_nvme_setup_io_queues(struct nvme_dev *dev)
 		nvme_suspend_io_queues(dev);
 		goto retry;
 	}
-	dev_info(dev->ctrl.device, "%d/%d/%d/%d default/read/poll/user queues\n",
+	dev_info(dev->ctrl.device, "%d/%d/%d default/read/poll queues\n",
 					dev->io_queues[HCTX_TYPE_DEFAULT],
 					dev->io_queues[HCTX_TYPE_READ],
-					dev->io_queues[HCTX_TYPE_POLL],
-					dev->nr_user_use_cq);
+					dev->io_queues[HCTX_TYPE_POLL]);
 	return 0;
 out_unlock:
 	mutex_unlock(&dev->shutdown_lock);
@@ -3310,8 +3175,6 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		         "(user must call SNVM_CHRDEV_CREATE first)\n");
 		return -ENODEV;
 	}
-	printk("ctrl exist, ioq_num is %u, cq_num is %u, map num is %u\n",
-	       ctrl->ioq_num, ctrl->cq_num, ctrl->ioq_map_num);
 
 	node = dev_to_node(&pdev->dev);
 	if (node == NUMA_NO_NODE)
@@ -3320,21 +3183,6 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	dev = kzalloc_node(sizeof(*dev), GFP_KERNEL, node);
 	if (!dev)
 		return -ENOMEM;
-
-	/*if the map is equal to the pre-set queue num, and set use sreg, reg the user defined io queues*/
-
-	if(ctrl && ctrl->ioq_num == ctrl->ioq_map_num && ctrl->use_sreg)
-	{
-		dev->nr_user_allocated_queues = ctrl->ioq_num;
-		dev->nr_user_allocated_cq = ctrl->cq_num;
-		dev->nr_user_allocated_sq = ctrl->ioq_num - ctrl->cq_num;
-		dev->use_user_allocated = 1;
-		dev->queue_on_host = ctrl->on_host;
-		if(pdev->vendor == 0x8086 && pdev->device==0x4140)
-			printk("this device is p5800x!\n");
-	}
-	else
-		dev->use_user_allocated = 0;
 
 	/*
 	 * B3 setup snapshot: copy ctrl->setup fields onto the per-dev
@@ -3779,10 +3627,7 @@ MODULE_DEVICE_TABLE(pci, nvme_id_table);
  *   1. pinned host pages on the host_list,
  *   2. nvidia_p2p_get_pages references on the device_list /
  *      device_queue_list (rmmod snvme will then refuse with "module in
- *      use" until reboot),
- *   3. ctrl->ioq_map_num / ctrl->cq_num accounting counters, leaving
- *      the next bind in a "ctrl exist, ioq_num=N cq_num=M map_num=K"
- *      dirty state.
+ *      use" until reboot).
  *
  * Capturing the opener at .open time (rather than reading `current` at
  * .release time) is critical: by the time __fput() invokes .release,
@@ -4273,7 +4118,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
 	int ret = 0;
     struct ctrl* ctrl = NULL;
     struct nvm_ioctl_map request;
-    struct nvm_ioctl_setup setup;
     struct map* map = NULL;
 	struct nvme_dev *ndev;
 	struct nvme_ns *ns;
@@ -4314,9 +4158,8 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
              *   map_kind == 0 (UNSPECIFIED)
              *                  Pre-B6 caller.  Falls back to the B2
              *                  semantics: group_id != 0 hangs the
-             *                  map on g->maps; group_id == 0 +
-             *                  ioq_idx >= 0 takes the legacy
-             *                  NVM_SET_IOQ_NUM accounting path.
+             *                  map on g->maps; group_id == 0 keeps
+             *                  it on the controller-global list only.
              */
             if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
             {
@@ -4335,10 +4178,8 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
 
             map = map_userspace(&host_list, ctrl, request.vaddr_start, request.n_pages);
             /*
-             * Guard against ERR_PTR / NULL *before* any deref. Previously
-             * the ioq_map_num accounting and map->ioq_idx write happened
-             * first, which would oops if map_userspace() failed (e.g.
-             * get_user_pages_fast returned -EFAULT). See PORTING.md §7.3.
+             * Guard against ERR_PTR / NULL *before* any deref. See
+             * PORTING.md §7.3.
              */
             if (IS_ERR_OR_NULL(map))
             {
@@ -4382,22 +4223,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
                 list_add_tail(&map->group_link, &g->maps);
                 g->nr_maps++;
                 mutex_unlock(&own->groups_lock);
-            } else if (request.ioq_idx >= 0) {
-                /* Legacy mode: account against ctrl budget. */
-                /* Reject overflow *before* bumping the counter so we
-                 * don't leave ioq_map_num in a poisoned state. */
-                if (ctrl->ioq_map_num + 1 > ctrl->ioq_num)
-                {
-                    printk("NVM_MAP_HOST_MEMORY ctrl->ioq_map_num is %d,ctrl->ioq_num is %d\n",
-                           ctrl->ioq_map_num, ctrl->ioq_num);
-                    unmap_and_release(map);
-                    return -EFAULT;
-                }
-                map->ioq_idx = request.ioq_idx;
-                map->is_cq   = request.is_cq;
-                ctrl->ioq_map_num += 1;
-                if (map->is_cq)
-                    ctrl->cq_num++;
             }
 
             if (copy_to_user((void __user*) request.ioaddrs, map->addrs,
@@ -4430,9 +4255,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
                             g->nr_maps--;
                         mutex_unlock(&own->groups_lock);
                     }
-                } else if (request.ioq_idx >= 0) {
-                    if (map->is_cq) ctrl->cq_num--;
-                    ctrl->ioq_map_num -= 1;
                 }
                 unmap_and_release(map);
                 return -EFAULT;
@@ -4449,13 +4271,10 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
 			 * group_id attaches the map to a per-fd group; zero
 			 * keeps it on the controller-global list only.
 			 *
-			 * Note: the legacy NVM_MAP_DEVICE_MEMORY case did NOT
-			 * touch ctrl->ioq_map_num / cq_num at all (data path
-			 * only).  We preserve that: even with group_id == 0
-			 * and ioq_idx >= 0 we just ignore the ioq tag here,
-			 * matching the historical behaviour.  GPU queue ring
-			 * registration still goes through
-			 * NVM_MAP_DEVICE_QUEUE_MEMORY in legacy mode.
+			 * Note: this is a data-path mapping only; GPU queue
+			 * ring registration goes through the per-fd queue
+			 * group (NVM_CREATE_QUEUE_GROUP +
+			 * NVM_ADD_USER_QUEUE) flow.
 			 */
 			if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
 			{
@@ -4544,52 +4363,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
 			ret = 0;
 			break;
 		}
-		case NVM_MAP_DEVICE_QUEUE_MEMORY: // 将用户态cuda malloc 分配的地址pin住并得到dma地址返回用户态
-		{
-			if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
-			{
-				return -EFAULT;
-			}
-
-			/* Queue-ring mappings MUST carry a queue index. Fail fast
-			 * so we don't waste an nvidia_p2p_get_pages() call. */
-			if (request.ioq_idx < 0)
-			{
-				printk("map_device_ioqueue_memory ioq_idx not set yet\n");
-				return -EFAULT;
-			}
-
-			map = map_device_ioqueue_memory(&device_queue_list, ctrl,
-			                                request.vaddr_start, request.n_pages);
-			if (IS_ERR_OR_NULL(map))
-			{
-				return IS_ERR(map) ? PTR_ERR(map) : -ENOMEM;
-			}
-
-			if (ctrl->ioq_map_num + 1 > ctrl->ioq_num)
-			{
-				printk("NVM_MAP_DEVICE_QUEUE_MEMORY ctrl->ioq_map_num is %d,ctrl->ioq_num is %d\n",
-				       ctrl->ioq_map_num, ctrl->ioq_num);
-				unmap_and_release(map);
-				return -EFAULT;
-			}
-			map->ioq_idx = request.ioq_idx;
-			map->is_cq   = request.is_cq;
-			ctrl->ioq_map_num += 1;
-			if (map->is_cq)
-				ctrl->cq_num++;
-
-			if (copy_to_user((void __user*) request.ioaddrs, map->addrs,
-			                 map->n_addrs * sizeof(uint64_t)))
-			{
-				if (map->is_cq) ctrl->cq_num--;
-				ctrl->ioq_map_num -= 1;
-				unmap_and_release(map);
-				return -EFAULT;
-			}
-			ret = 0;
-			break;
-		}
         case NVM_UNMAP_HOST_MEMORY:
 		{
             if (copy_from_user(&addr, (void __user*) arg, sizeof(u64)))
@@ -4623,12 +4396,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
 				if (need_data_lock)
 					mutex_lock(&own->data_maps_lock);
 
-				if(map->ioq_idx>=0)
-				{
-					if(map->is_cq)
-						ctrl->cq_num--;
-					ctrl->ioq_map_num--;
-				}
 				if (need_data_lock) {
 					if (own->nr_data_maps > 0)
 						own->nr_data_maps--;
@@ -4714,14 +4481,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
             map = map_find(&device_queue_list, addr);
             if (map != NULL)
             {
-				if(map->ioq_idx>=0)
-				{
-					// printk("unmap_userspace map map->ioq_idx is %d, map->is_cq is %d",map->ioq_idx,map->is_cq);
-					if(map->is_cq)
-						ctrl->cq_num--;
-
-					ctrl->ioq_map_num--;
-				}
                 unmap_and_release(map);
 				ret = 0;
                 break;
@@ -4729,112 +4488,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
             ret = -EINVAL;
             printk(KERN_WARNING "NVM_UNMAP_DEVICE_QUEUE_MEMORY Mapping for address %llx not found\n", addr);
             break;
-		}
-		case NVM_SET_IOQ_NUM:
-		{
-			/*
-			 * Userspace declares its full queue-budget setup in
-			 * one shot: total user IOQ count, on-host vs GPU
-			 * residency, kernel-side IOQ cap, write/poll override,
-			 * and an optional per-owner partition of the user
-			 * share (groups[]).
-			 *
-			 * ABI rev note: this used to carry struct nvm_ioctl_map
-			 * (packed into .ioq_idx / .is_cq).  Tutti replaced
-			 * that with the explicit nvm_ioctl_setup struct because
-			 * (a) the legacy layout had no room for cap_kernel_ioq
-			 * / groups, and (b) _IOC_SIZE differed from the
-			 * declared ioctl number's size class, which the new
-			 * layout fixes.  Old binaries get -ENOTTY at ioctl
-			 * entry rather than silent misparse.
-			 *
-			 * Validation:
-			 *   - ioq_num must be > 0
-			 *   - downward-only updates: if a previous call set
-			 *     ctrl->ioq_num, the new ioq_num must not exceed it
-			 *   - reserved fields must be zero
-			 *   - nr_groups <= SNVM_MAX_QUEUE_GROUPS
-			 *   - sum(groups[].count) must equal ioq_num when
-			 *     nr_groups > 0
-			 */
-			unsigned int i;
-
-			if (copy_from_user(&setup, (void __user *)arg, sizeof(setup)))
-				return -EFAULT;
-
-			if (setup.ioq_num == 0) {
-				pr_err("snvme: NVM_SET_IOQ_NUM bad request: ioq_num=0 (declared=%u)\n",
-				       ctrl->ioq_num);
-				return -EINVAL;
-			}
-			if (ctrl->ioq_num && setup.ioq_num > ctrl->ioq_num) {
-				pr_err("snvme: NVM_SET_IOQ_NUM grow attempt: declared=%u, requested=%u\n",
-				       ctrl->ioq_num, setup.ioq_num);
-				return -EINVAL;
-			}
-			if (setup.reserved[0] || setup.reserved[1]) {
-				pr_err("snvme: NVM_SET_IOQ_NUM: reserved fields must be zero\n");
-				return -EINVAL;
-			}
-			if (setup.nr_groups > SNVM_MAX_QUEUE_GROUPS) {
-				pr_err("snvme: NVM_SET_IOQ_NUM: nr_groups=%u > max %u\n",
-				       setup.nr_groups, SNVM_MAX_QUEUE_GROUPS);
-				return -EINVAL;
-			}
-			if (setup.nr_groups) {
-				unsigned int sum = 0;
-				for (i = 0; i < setup.nr_groups; i++) {
-					if (setup.groups[i].reserved) {
-						pr_err("snvme: NVM_SET_IOQ_NUM: group[%u].reserved must be zero\n", i);
-						return -EINVAL;
-					}
-					sum += setup.groups[i].count;
-				}
-				if (sum != setup.ioq_num) {
-					pr_err("snvme: NVM_SET_IOQ_NUM: sum(groups[].count)=%u != ioq_num=%u\n",
-					       sum, setup.ioq_num);
-					return -EINVAL;
-				}
-			}
-
-			/*
-			 * Commit to ctrl.  The legacy on_host / ioq_num scalars
-			 * are kept in sync with the new setup snapshot because
-			 * existing in-kernel code (probe segment 6a, queue
-			 * accounting in NVM_MAP_* handlers) still reads those
-			 * specific fields by name.
-			 */
-			ctrl->ioq_num              = setup.ioq_num;
-			ctrl->on_host              = !!(setup.flags & NVM_QUEUE_SETUP_F_ON_HOST);
-			ctrl->setup.valid          = 1;
-			ctrl->setup.ioq_num        = setup.ioq_num;
-			ctrl->setup.flags          = setup.flags;
-			ctrl->setup.cap_kernel_ioq = setup.cap_kernel_ioq;
-			ctrl->setup.nr_write       = setup.nr_write;
-			ctrl->setup.nr_poll        = setup.nr_poll;
-			ctrl->setup.nr_groups      = setup.nr_groups;
-			for (i = 0; i < setup.nr_groups; i++) {
-				ctrl->setup.groups[i].owner_id  = setup.groups[i].owner_id;
-				ctrl->setup.groups[i].count     = setup.groups[i].count;
-				ctrl->setup.groups[i].numa_node = setup.groups[i].numa_node;
-				ctrl->setup.groups[i].reserved  = 0;
-			}
-			pr_info("snvme: NVM_SET_IOQ_NUM: ioq_num=%u on_host=%u cap_kernel=%u groups=%u\n",
-				setup.ioq_num, ctrl->on_host,
-				setup.cap_kernel_ioq, setup.nr_groups);
-			ret = 0;
-			break;
-		}
-		case NVM_SET_SHARE_REG:
-		{
-            if (copy_from_user(&request, (void __user*) arg, sizeof(request)))
-            {
-                return -EFAULT;
-            }
-			ctrl->use_sreg = request.ioq_idx;
-			printk("NVM_SET_SHARE_REG ctrl->use_sreg %d",ctrl->use_sreg);
-			ret = 0;
-			break;
 		}
 		case NVM_GET_DEV_INFO:
 		{
@@ -4906,7 +4559,7 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
 						 ? ndev->user_start_qid
 						 : ndev->online_queues;
 			drequest.dstrd         = ndev->db_stride;
-			drequest.nr_user_q     = ndev->nr_user_use_cq;
+			drequest.nr_user_q     = ndev->online_user_queues;
 			drequest.block_size    = 1 << ns->lba_shift;
 			/* CTRL.MDTS in BYTES.  max_hw_sectors is the
 			 * NVMe-block-layer internal in 512-byte sectors;
@@ -4959,14 +4612,6 @@ static long snvm_dev_map_ioctl(struct file* file, unsigned int cmd, unsigned lon
 					 sizeof(struct nvm_ioctl_dev)))
 				return -EFAULT;
 
-			ret = 0;
-			break;
-		}
-		case NVM_CLEAR_IOQ_NUM:
-		{
-			ctrl->ioq_map_num = 0;
-			ctrl->cq_num      = 0;
-			printk("NVM_CLEAR_IOQ_NUM \n");
 			ret = 0;
 			break;
 		}
@@ -5426,14 +5071,10 @@ rollback_unlocked:
 		case NVM_SET_KERNEL_IOQ_CAP:
 		{
 			/*
-			 * Cap-only update path: stash setup.cap_kernel_ioq
-			 * without touching the legacy NVM_SET_IOQ_NUM state
-			 * (ctrl->ioq_num, use_sreg, on_host, groups[]).
+			 * Cap-only update path: stash setup.cap_kernel_ioq.
 			 * Probe segment 6a copies ctrl->setup.cap_kernel_ioq
 			 * into dev->cap_kernel_ioq at SNVM_DEVICE_BIND time,
-			 * gated on ctrl->setup.valid -- so we set .valid here
-			 * too, but with ioq_num=0 the use_user_allocated probe
-			 * branch stays untaken.
+			 * gated on ctrl->setup.valid.
 			 *
 			 * Must run pre-bind to have any effect.  We do not
 			 * reject post-bind calls (the field write is still
@@ -5449,8 +5090,7 @@ rollback_unlocked:
 			ctrl->setup.cap_kernel_ioq = cap;
 			ctrl->setup.valid          = 1;
 
-			pr_info("snvme: NVM_SET_KERNEL_IOQ_CAP cap=%u (legacy ioq_num=%u, use_sreg=%u left unchanged)\n",
-				cap, ctrl->ioq_num, ctrl->use_sreg);
+			pr_info("snvme: NVM_SET_KERNEL_IOQ_CAP cap=%u\n", cap);
 			ret = 0;
 			break;
 		}
@@ -5515,10 +5155,7 @@ static int snvm_dev_release(struct inode *inode, struct file *file)
 	struct snvm_dev_owner *own = file->private_data;
 	struct ctrl *ctrl;
 	struct task_struct *owner;
-	struct list_node *element;
-	struct map *m;
 	struct snvm_qgroup *g, *tmp_g;
-	unsigned int rb_ioq = 0, rb_cq = 0;
 	unsigned long n_host = 0, n_dev = 0, n_devq = 0;
 	unsigned int n_groups = 0;
 
@@ -5585,65 +5222,14 @@ static int snvm_dev_release(struct inode *inode, struct file *file)
 				n_data, owner ? owner->pid : -1);
 	}
 
-	/*
-	 * Pass 1: walk host_list + device_queue_list to compute the
-	 * ctrl->ioq_map_num / cq_num rollback for descriptors that the
-	 * dying owner had tagged with ioq_idx >= 0.  We cannot fold
-	 * this into map_purge_by_owner() because map.c does not know
-	 * about struct ctrl's accounting fields.
-	 */
-	for (element = list_next(&host_list.head); element != NULL;
-	     element = list_next(element)) {
-		m = container_of(element, struct map, list);
-		if (m->owner == owner && m->ioq_idx >= 0) {
-			rb_ioq++;
-			if (m->is_cq)
-				rb_cq++;
-		}
-	}
-	for (element = list_next(&device_queue_list.head); element != NULL;
-	     element = list_next(element)) {
-		m = container_of(element, struct map, list);
-		if (m->owner == owner && m->ioq_idx >= 0) {
-			rb_ioq++;
-			if (m->is_cq)
-				rb_cq++;
-		}
-	}
-
-	/* Pass 2: actually free. */
+	/* Free legacy (non-group) maps owned by the dying task. */
 	n_host = map_purge_by_owner(&host_list,         owner);
 	n_dev  = map_purge_by_owner(&device_list,       owner);
 	n_devq = map_purge_by_owner(&device_queue_list, owner);
 
-	/*
-	 * Apply rollback under the implicit serialisation provided by
-	 * the per-fd nature of release (no other thread holds this fd
-	 * by the time we get here).  Use checked subtraction so a
-	 * buggy userspace path cannot wrap the counters below zero,
-	 * which would silently disable the use_sreg branch on the next
-	 * bind (PORTING.md \xc2\xa77.3.1 ioq_map_num-rollback trap).
-	 */
-	if (ctrl) {
-		if (rb_cq > ctrl->cq_num) {
-			pr_warn("snvme: snvm_dev_release: cq_num underflow (have %u, would subtract %u)\n",
-				ctrl->cq_num, rb_cq);
-			ctrl->cq_num = 0;
-		} else {
-			ctrl->cq_num -= rb_cq;
-		}
-		if (rb_ioq > ctrl->ioq_map_num) {
-			pr_warn("snvme: snvm_dev_release: ioq_map_num underflow (have %u, would subtract %u)\n",
-				ctrl->ioq_map_num, rb_ioq);
-			ctrl->ioq_map_num = 0;
-		} else {
-			ctrl->ioq_map_num -= rb_ioq;
-		}
-	}
-
 	if (n_host || n_dev || n_devq)
-		pr_info("snvme: snvm_dev_release: reclaimed host=%lu dev=%lu devq=%lu (rb ioq=%u cq=%u) for pid=%d\n",
-			n_host, n_dev, n_devq, rb_ioq, rb_cq,
+		pr_info("snvme: snvm_dev_release: reclaimed host=%lu dev=%lu devq=%lu for pid=%d\n",
+			n_host, n_dev, n_devq,
 			owner ? owner->pid : -1);
 
 	mutex_destroy(&own->groups_lock);
@@ -5748,8 +5334,7 @@ static int snvm_register_driver(void)
 	BUILD_BUG_ON(IRQ_AFFINITY_MAX_SETS < 2);
 	nvme_num = 0;
 	gpu_num = 0;
-	// nvfs_fill_gpu2peer_distance_table_once();
-	
+
 	return pci_register_driver(&snvme_driver);
 }
 

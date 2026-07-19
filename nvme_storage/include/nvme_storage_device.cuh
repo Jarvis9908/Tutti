@@ -4,7 +4,7 @@
 /**
  * nvme_storage_device.cuh -- the entire on-GPU NVMe submit surface.
  *
- * Layer: nvme_storage (R5b).
+ * Layer: nvme_storage.
  *
  *   resolve_lba       walks NvmeFileDeviceHandle::extents to map
  *                     a (logical_off, nbytes) request onto an

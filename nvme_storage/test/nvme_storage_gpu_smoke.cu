@@ -1,5 +1,5 @@
 /**
- * nvme_storage_gpu_smoke.cu -- end-to-end GPU device-side submit (R5b).
+ * nvme_storage_gpu_smoke.cu -- end-to-end GPU device-side submit.
  *
  * Layer: nvme_storage tests.
  *
@@ -51,7 +51,7 @@
 #include "../../device_manager/include/local_nvme_direct_registry.h"
 #include "../../device_manager/include/nvmeservice_backed_registry.h"
 #include "../../device_manager/include/local_nvme_device.h"
-#include "../../runtime/include/device.h"
+#include "../../coordinator/include/device.h"
 
 #include <nvm_ctrl.h>
 #include <nvm_dma.h>

@@ -215,31 +215,4 @@ static inline int nvfs_get_numa_node_from_pdevinfo(uint64_t pdevinfo) {
 	return node;
 }
 
-struct pci_dev *nvfs_get_next_acs_device(struct pci_dev *from);
-
-// one-time pci-distance table initialization
-void nvfs_fill_gpu2peer_distance_table_once(void);
-
-// get hash-key for gpu pciinfo
-unsigned int nvfs_get_gpu_hash_index(u64 pdevinfo);
-
-// get gpu pci info for hash-key
-uint64_t nvfs_lookup_gpu_hash_index_entry(unsigned int index);
-
-// get gpu p2p info for hash-key
-uint64_t nvfs_lookup_peer_hash_index_entry(unsigned int index);
-
-// return pci-distance between a gpu(hash-key) and peer dma source
-unsigned int nvfs_get_gpu2peer_distance(struct device *dev, unsigned int gpuindex);
-
-// stats
-void nvfs_update_peer_usage(unsigned int gpu_index, u64 peer_pdevinfo);
-
-unsigned int nvfs_aggregate_cross_peer_usage(unsigned int gpu_index);
-
-void nvfs_reset_peer_affinity_stats(void);
-
-int nvfs_peer_distance_show(struct seq_file *m, void *v);
-
-int nvfs_peer_affinity_show(struct seq_file *m, void *v);
 #endif

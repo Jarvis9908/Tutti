@@ -33,7 +33,7 @@ struct snvm_queue_group {
 };
 
 struct snvm_queue_setup {
-    u32 valid;        /* set to 1 once NVM_SET_IOQ_NUM has populated */
+    u32 valid;        /* set to 1 once NVM_SET_KERNEL_IOQ_CAP has populated */
                       /* this block; 0 = use upstream defaults. */
     u32 ioq_num;      /* total user-side IOQ count. */
     u32 flags;        /* mirrors NVM_QUEUE_SETUP_F_* in uapi. */
@@ -61,22 +61,10 @@ struct ctrl
     struct cdev         cdev;       /* Character device (separately allocated) */
     struct device*      chrdev;     /* Character device handle */
     struct nvme_dev *dev;
-    /*****info about user defined nvme io qp **** */
-    unsigned int        on_host;     /*1 on host, 0 on device*/
-    unsigned int        ioq_num;    /*number of user defined nvme io queues*/
-    unsigned int        cq_num;    /*number of user defined nvme io queues*/
-    unsigned int        ioq_map_num;    /*number of user registered dma register*/
-    unsigned int        use_sreg;   /*flag to indicated the map num has statifed nvme regiester requirements, when map_num==ioq_num, this flag is 1.need set by user*/
     /*
-     * Full queue-budget snapshot from NVM_SET_IOQ_NUM.  Distinct from
-     * the legacy on_host / ioq_num / cq_num scalars above (which the
-     * old ioctl payload only knew how to populate) so that:
-     *   - ABI rev bumps of nvm_ioctl_setup don't churn the historical
-     *     fields kernel-internal code already reads,
+     * Full queue-budget snapshot from NVM_SET_IOQ_NUM.
      *   - "user called NVM_SET_IOQ_NUM" can be distinguished from
-     *     "user never called it" via setup.valid (the legacy
-     *     scalars share the same uninitialised-zero state with the
-     *     not-yet-called case).
+     *     "user never called it" via setup.valid.
      */
     struct snvm_queue_setup setup;
 

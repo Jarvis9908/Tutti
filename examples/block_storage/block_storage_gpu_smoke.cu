@@ -1,5 +1,5 @@
 /**
- * block_storage_gpu_smoke.cu -- R6.3 end-to-end GPU device-side
+ * block_storage_gpu_smoke.cu -- end-to-end GPU device-side
  * submit through HostFsBackedBlockStorage.
  *
  * Layer: block_storage tests.
@@ -196,7 +196,7 @@ __global__ void block_storage_read_kernel(const R6GpuIoCtx* ctx, uint32_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// Idempotency helper (R6.2-style)
+// Idempotency helper
 // ---------------------------------------------------------------------------
 void wipe_stragglers(tutti::IBlockStorage& bs) {
     std::size_t n = 0;
@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
             (unsigned long long)bufs[0].dma->ioaddrs[0],
             (unsigned long long)bufs[1].dma->ioaddrs[0]);
 
-    // [9] configure the async handle pool (R11), then
+    // [9] configure the async handle pool, then
     //     block_storage->acquire_device_handle.  Stream = default
     //     (nullptr/0) -- this smoke has no dedicated stream.
     if (!bs->configure_handle_pool(1, 1)) STEP_FAIL("configure_handle_pool");

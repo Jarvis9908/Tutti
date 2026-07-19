@@ -28,10 +28,6 @@ struct ctrl* ctrl_get(struct list* list, struct class* cls, struct pci_dev* pdev
     ctrl->rdev = 0;
     ctrl->cls = cls;
     ctrl->chrdev = NULL;
-    ctrl->use_sreg = 0;
-    ctrl->ioq_num = 0;
-    ctrl->ioq_map_num = 0;
-    ctrl->cq_num = 0;
     /*
      * Zero the queue-setup snapshot up front so that the segment 6a
      * probe-time copy in pci.c reads setup.valid == 0 ("ioctl not

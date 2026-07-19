@@ -1,16 +1,14 @@
-# block_storage/ -- Tutti GpuFile (block) layer (R6).
+# block_storage/ -- Tutti GpuFile (block) layer.
 #
-# R6.1 shipped the interface + a pure resolve helper.
-# R6.2 lands HostFsBackedBlockStorage + PersistentGpuFileLog +
-#       a host-side end-to-end smoke.
-# R6.3 lands the GPU acquire/release path + a GPU device-side
-#       submit smoke (one kernel-thread-per-IO across shards).
+# Ships the IBlockStorage interface + a pure resolve helper, the
+# HostFsBackedBlockStorage implementation (+ PersistentGpuFileLog), and
+# the GPU acquire/release path (one kernel-thread-per-IO across shards).
 #
 # Builds:
 #   tutti_block_storage              -- the runtime lib (static-style)
-#   block_storage_resolve_test       -- R6.1 unit test for gpu_file_resolve
-#   block_storage_smoke              -- R6.2 host-side end-to-end
-#   block_storage_gpu_smoke          -- R6.3 GPU device-side end-to-end
+#   block_storage_resolve_test       -- unit test for gpu_file_resolve
+#   block_storage_smoke              -- host-side end-to-end
+#   block_storage_gpu_smoke          -- GPU device-side end-to-end
 #
 # Layer dependency:
 #   block_storage  -> nvme_storage   (INvmeStorage / NvmeFile)
@@ -51,7 +49,7 @@ set_target_properties(tutti_block_storage PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# Smoke tests live in the top-level examples/ tree (R9.4).
+# Smoke tests live in the top-level examples/ tree.
 # ---------------------------------------------------------------------------
 
 install(TARGETS tutti_block_storage         DESTINATION "lib")

@@ -415,7 +415,7 @@ private:
     uint64_t*  h_values_  = nullptr;
 
     // Per-L1-slot last-touch stream + shared per-stream events (mirror
-    // of GpuSlotPool's R11.4 scheme).
+    // of GpuSlotPool's shared-event scheme -- see gpu_slot_pool.h).
     std::vector<cudaStream_t> last_touch_stream_;   // l1_capacity entries
     std::vector<uint8_t>      slot_ever_touched_;
     std::unordered_map<cudaStream_t, cudaEvent_t> stream_events_;

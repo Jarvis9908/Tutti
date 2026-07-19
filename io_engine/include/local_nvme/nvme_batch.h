@@ -2,20 +2,9 @@
 #define __TUTTI_IO_ENGINE_LOCAL_NVME_NVME_BATCH_H__
 
 /**
- * nvme_batch.h -- NVMe-native batch IO entry types (R8).
+ * nvme_batch.h -- NVMe-native batch IO entry types.
  *
  * Layer: io_engine, local_nvme backend.
- *
- * Spec: doc/refactor/R8_io_engine_plan.md §3.
- *
- * Field-for-field analogue of the legacy GPUIoContext / BatchIoEntry
- * from the pre-refactor monolithic GPU-file path, but
- * built on the post-R5b/R6/R7 type stack:
- *
- *   legacy NVMeFilesSpan       -> GpuFileHandle::d_shards_dev (R6 + R8.1)
- *   legacy PRPMappingEntry*    -> AddressDescriptor*          (R7)
- *   legacy off_t prp_idx       -> uint32_t prp_idx
- *   legacy off_t file_offset   -> uint64_t file_offset
  *
  * NvmeBatchEntry carries the FULL shard pointer table per IO --
  * NOT a pre-resolved single shard.  The kernel does its own stripe

@@ -1,16 +1,15 @@
 /**
- * io_engine_host_smoke.cu -- R8.1 host-side build_nvme_batch smoke.
+ * io_engine_host_smoke.cu -- host-side build_nvme_batch smoke.
  *
  * Brings up the full bottom-up stack (registry -> nvme_storage ->
  * block_storage -> memory) and exercises:
  *
- *   - HostFsBackedBlockStorage::acquire_device_handle now populates
- *     GpuFileHandle::d_shards_dev (R8.1's R6 micro-extension).
- *     We cudaMemcpy the device array back and assert it matches
- *     d_shards_host element-by-element.
+ *   - HostFsBackedBlockStorage::acquire_device_handle populates
+ *     GpuFileHandle::d_shards_dev.  We cudaMemcpy the device array
+ *     back and assert it matches d_shards_host element-by-element.
  *
  *   - tutti::build_nvme_batch over a single (tensor, file) input
- *     produces N entries with the legacy `fill_ctx` field formula:
+ *     produces N entries with this field formula:
  *         shards      = file_handle->d_shards_dev
  *         num_shards  = file_handle->num_shards
  *         prp_entry   = &(IoSliceView[i].d_ios[k])
@@ -18,15 +17,14 @@
  *         file_offset = input.file_byte_offset
  *         is_read     = batch direction
  *
- *   - Multi-tensor case: prp_idx resets to 0 at each input tensor,
- *     mirroring legacy `fill_ctx` (which loops over cache_mappings
- *     PER TENSOR and treats `j` as a per-tensor running index).
+ *   - Multi-tensor case: prp_idx resets to 0 at each input tensor
+ *     (`j` is a per-tensor running index).
  *
  *   - Empty / oversize / null-input failure paths exit cleanly with
  *     a stderr diagnostic.
  *
  * NO CUDA kernel launch.  NO cudaMemcpy of NvmeBatchEntry to GPU.
- * Those land in R8.2 (`io_engine_smoke` end-to-end byte-verify).
+ * Those land in `io_engine_smoke` (end-to-end byte-verify).
  *
  * Test contract:
  *   - sole owner of every NVMe (NVMeService daemon MUST NOT be running)
@@ -42,15 +40,15 @@
 #include "host_batch_builder.h"
 #include "nvme_batch.h"
 
-// memory (R7)
+// memory
 #include "host_device_memory_subsystem.h"
 
-// block_storage (R6 + R8.1 d_shards_dev extension)
+// block_storage
 #include "host_fs_backed_block_storage.h"
 #include "block_storage.h"
 #include "gpu_file_resolve.h"
 
-// nvme_storage (R5)
+// nvme_storage
 #include "host_fs_backed_nvme_storage.h"
 #include "nvme_storage.h"
 
@@ -232,7 +230,7 @@ int main(int argc, char** argv) {
     STEP_OK("open_gpu_file(CREATE) A '%s' shards=%u tensor_size=%u",
             kGpuFileNameA, kNumShards, kTensorSize);
 
-    // [8] configure the async handle pool (R11) + acquire_device_handle
+    // [8] configure the async handle pool + acquire_device_handle
     //     on A; assert d_shards_dev is populated.  Stream = default
     //     (nullptr/0) -- this smoke is host-side only, no kernels.
     if (!bs->configure_handle_pool(2, 2)) STEP_FAIL("configure_handle_pool");
@@ -241,7 +239,7 @@ int main(int argc, char** argv) {
     if (hA->num_shards != kNumShards)
         STEP_FAIL("hA->num_shards=%u (want %u)", hA->num_shards, kNumShards);
     if (hA->d_shards_dev == nullptr)
-        STEP_FAIL("hA->d_shards_dev == nullptr (R8.1 must populate)");
+        STEP_FAIL("hA->d_shards_dev == nullptr (acquire must populate)");
     {
         // Verify the array itself is GPU memory.
         cudaPointerAttributes attr{};

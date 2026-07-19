@@ -4,9 +4,9 @@
 /**
  * queue_acquire_helper.cuh -- on-GPU queue selection + submit.
  *
- * Layer: nvme_storage (R5b).
+ * Layer: nvme_storage.
  *
- * Verbatim port of the legacy on-GPU queue helper (pre-refactor):
+ * On-GPU queue selection + submit primitives:
  *
  *   - acquire_queue:  hash-only.  No actual locking, no release path
  *                     needed.  We rely on libnvm's get_cid/put_cid

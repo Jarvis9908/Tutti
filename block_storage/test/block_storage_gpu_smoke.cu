@@ -1,5 +1,5 @@
 /**
- * block_storage_gpu_smoke.cu -- R6.3 end-to-end GPU device-side
+ * block_storage_gpu_smoke.cu -- end-to-end GPU device-side
  * submit through HostFsBackedBlockStorage.
  *
  * Layer: block_storage tests.
@@ -88,7 +88,7 @@
 
 #include "../../device_manager/include/local_nvme_direct_registry.h"
 #include "../../device_manager/include/local_nvme_device.h"
-#include "../../runtime/include/device.h"
+#include "../../coordinator/include/device.h"
 
 #include <nvm_ctrl.h>
 #include <nvm_dma.h>
@@ -193,7 +193,7 @@ __global__ void block_storage_read_kernel(const R6GpuIoCtx* ctx, uint32_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// Idempotency helper (R6.2-style)
+// Idempotency helper
 // ---------------------------------------------------------------------------
 void wipe_stragglers(tutti::IBlockStorage& bs) {
     std::size_t n = 0;

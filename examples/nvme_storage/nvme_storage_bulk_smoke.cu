@@ -21,7 +21,7 @@
  *              end.
  *   - print wall-time + speedup ratio.
  *
- * R11.5: both phases use multi-threaded create (one thread per 2000
+ * Both phases use multi-threaded create (one thread per 2000
  * files).  create_file_locked runs FS operations (open/fallocate/
  * fiemap/linkat) WITHOUT mtx_ so the threads genuinely parallelize;
  * only the bookkeeping (log add, files map insert) is serialized.
@@ -133,7 +133,7 @@ static double seconds_since(
 
 // ----------------------------------------------------------------------------
 
-// R11.5: parallel bulk-create.  One thread per chunk of
+// Parallel bulk-create.  One thread per chunk of
 // kCreateChunkSize files; the FS operations (open/fallocate/fiemap/
 // linkat) in create_file_locked run WITHOUT mtx_ so the threads
 // genuinely parallelize at the kernel level.
@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // [4] phase A: per-call durable creates (multi-threaded, R11.5).
+    // [4] phase A: per-call durable creates (multi-threaded).
     {
         auto t0 = std::chrono::steady_clock::now();
         if (!parallel_create(*storage, devs, "A_", n_files, file_size,
@@ -321,7 +321,7 @@ int main(int argc, char** argv) {
     }
 
     // [5] phase B: bulk creates + one flush_metadata at end
-    //     (multi-threaded, R11.5).
+    //     (multi-threaded).
     std::vector<CreateLog> b_log;
     b_log.reserve(n_files);
     double sec_b_creates = 0.0;

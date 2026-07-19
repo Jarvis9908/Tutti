@@ -1,8 +1,8 @@
 /**
- * e2e_smoke.cu -- R9 end-to-end smoke driven entirely through the
+ * e2e_smoke.cu -- end-to-end smoke driven entirely through the
  * Coordinator.
  *
- * Proves the R9.3 wiring: a single Coordinator::bootstrap() brings up
+ * Proves that a single Coordinator::bootstrap() brings up
  * the whole stack (registry -> nvme_storage -> block_storage ->
  * memory -> io_engine), and the high-level passthroughs
  * (open_gpu_file / acquire_device_handle / allocate_device /
@@ -19,7 +19,7 @@
  *   WRITE : seed-B -> device tensor -> coord.submit_batch(write)
  *           -> drop page cache -> host pread -> verify shards == seed-B
  *
- * Bring-up mode (R9.6): defaults to IN_PROCESS (this process owns the
+ * Bring-up mode: defaults to IN_PROCESS (this process owns the
  * NVMe).  Pass --service <endpoint> to drive the SAME stack through a
  * running tutti_daemon over the SERVICE_CLIENT path -- the daemon owns
  * chrdev/bind, this process attaches as a libnvm client and builds its
@@ -278,7 +278,7 @@ int main(int argc, char** argv) {
         STEP_FAIL("submit_batch(write)");
     STEP_OK("coord.submit_batch(write) ok");
 
-    // R11.5: read_blocking uses O_DIRECT (bypasses page cache), so no
+    // read_blocking uses O_DIRECT (bypasses page cache), so no
     // posix_fadvise cache-drop is needed before host pread.
     {
         AlignedBuf got(kTensorSize);

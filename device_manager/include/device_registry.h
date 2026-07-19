@@ -12,8 +12,8 @@
  *   - Backends register their devices into the registry at init time
  *     (one entry per NVMe controller, RDMA NIC, GDS adapter, ...).
  *   - The registry is the single, runtime-facing source of truth for
- *     "the device fleet" — replacing today's ad-hoc discovery paths
- *     scattered across the legacy GPU-file path and NVMeService.
+ *     "the device fleet", instead of each caller doing its own
+ *     ad-hoc discovery.
  *
  * Layer boundary:
  *   - This is the *service* contract; the runtime depends on this

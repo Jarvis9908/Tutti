@@ -6,7 +6,7 @@
 #   - LocalNvmeDirectRegistry        (IN_PROCESS bootstrap)
 #   - NvmeServiceBackedRegistry      (SERVICE_CLIENT bootstrap)
 #
-# Plus (R5b):
+# Plus:
 #   - NvmeQueueGroup                 (per-fd NVMe user queue pool +
 #                                     GPU-resident d_qps[])
 #
@@ -52,7 +52,7 @@ set_target_properties(tutti_device_manager PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
-# Smoke tests live in the top-level examples/ tree (R9.4).
+# Smoke tests live in the top-level examples/ tree.
 
 install(TARGETS tutti_device_manager DESTINATION "lib")
 install(DIRECTORY include/ DESTINATION "include/tutti/device_manager"

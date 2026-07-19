@@ -36,7 +36,7 @@ set_target_properties(tutti_memory PROPERTIES
     INSTALL_RPATH "$ORIGIN"
 )
 
-# Smoke tests live in the top-level examples/ tree (R9.4).
+# Smoke tests live in the top-level examples/ tree.
 
 install(TARGETS tutti_memory DESTINATION "lib")
 install(DIRECTORY include/ DESTINATION "include/tutti/memory"

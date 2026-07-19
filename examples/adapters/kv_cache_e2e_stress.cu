@@ -1,6 +1,7 @@
 /**
  * kv_cache_e2e_stress.cu -- large-scale end-to-end stress test through
- * the full Coordinator + KvCacheIoAdapter stack (R11.5 + R12 D-mla/D-stream/D-scale).
+ * the full Coordinator + KvCacheIoAdapter stack (MLA layout, stream
+ * overlap, and scale scenarios).
  *
  * Uses ONLY adapters/kv_cache + Coordinator public interfaces (no
  * direct nvme_storage/block_storage access, except mount_path/

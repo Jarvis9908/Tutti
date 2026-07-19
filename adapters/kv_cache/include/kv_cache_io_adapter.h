@@ -3,39 +3,38 @@
 
 /**
  * kv_cache_io_adapter.h -- KV-cache semantics adapter on top of the
- * generic Tutti io_engine (closes legacy-vs-tutti gaps D1 + D2).
+ * generic Tutti io_engine.
  *
  * Layer: adapters/ (framework-facing; NOT part of the core runtime --
  * see Roadmap.md "Adapter Layer").  The core io_engine deliberately
  * only knows generic `(tensor, file_handle, file_byte_offset)` tuples;
- * it has no notion of K/V caches or transformer layers.  Historically
- * (GeminiFS `geminifs_batched_xfer`) that knowledge was baked INTO the
- * engine.  This adapter is the new home for it:
+ * it has no notion of K/V caches or transformer layers.  This adapter
+ * owns that knowledge instead, so io_engine itself stays
+ * framework-agnostic:
  *
- *   D1 (KV/layer offset semantics): reconstructs the legacy per-layer
- *       byte-offset formula
+ *   KV/layer offset semantics: computes the per-layer byte-offset
+ *       formula
  *           standard : K @ layer * tensor_size * 2
  *                      V @ layer * tensor_size * 2 + tensor_size
  *           MLA      :   @ layer * tensor_size
  *       and turns a per-layer (K[],V[],file[]) batch into the generic
  *       NvmeBatchInputTensor list the io_engine consumes.
  *
- *   D2 (auto-chunking): the v0.1 LocalNvmeIoEngine owns ONE fixed
- *       scratch buffer (max_entries_per_batch) and rejects any batch
- *       that overflows it -- unlike legacy's 512-entry BatchIoPool
- *       loop.  This adapter greedily packs inputs into
+ *   Auto-chunking: the v0.1 LocalNvmeIoEngine owns ONE fixed scratch
+ *       buffer (max_entries_per_batch) and rejects any batch that
+ *       overflows it.  This adapter greedily packs inputs into
  *       <= max_entries chunks at tensor boundaries and submits each,
  *       so callers can hand it an arbitrarily large block list.
  *
  * What this adapter does NOT do (kept out of scope on purpose):
  *   - It does not own memory registration; callers register their K/V
  *     tensors with the Coordinator (granularity == tensor_size) and
- *     pass the resulting MemoryRegion* in.  One MemoryRegion per
- *     (block, layer, K-or-V) tensor, matching legacy's one-tensor-per
- *     -registered-buffer model.  (A future optimisation can register
- *     the whole per-layer cache once and address single slices via
- *     IMemorySubsystem::lookup_io_slice; that needs a slice-scoped
- *     builder path in io_engine and is tracked separately.)
+ *     pass the resulting MemoryRegion* in -- one MemoryRegion per
+ *     (block, layer, K-or-V) tensor.  (A future optimisation can
+ *     register the whole per-layer cache once and address single
+ *     slices via IMemorySubsystem::lookup_io_slice; that needs a
+ *     slice-scoped builder path in io_engine and is tracked
+ *     separately.)
  *   - It does not manage GpuFile lifecycle / the KV index; that's the
  *     LMCache-shaped backend above this.
  *
@@ -63,10 +62,9 @@ class KvCacheIoAdapter {
 public:
     /// @param coord        a booted Coordinator (owns memory + io_engine).
     /// @param tensor_size  the per-(block,layer) K (or V) tensor size in
-    ///                     bytes == GpuFileSpec.tensor_shape[2] (legacy
-    ///                     "len" / kv_size).  Used for the layer offset
-    ///                     arithmetic; MUST match how the GpuFiles were
-    ///                     laid out.
+    ///                     bytes == GpuFileSpec.tensor_shape[2]. Used for
+    ///                     the layer offset arithmetic; MUST match how
+    ///                     the GpuFiles were laid out.
     /// @param use_mla      false: standard K/V split (kv_dim == 2).
     ///                     true : unified single-tensor layout (kv_dim == 1).
     KvCacheIoAdapter(Coordinator& coord,
@@ -74,7 +72,7 @@ public:
                      bool         use_mla = false);
 
     // ------------------------------------------------------------------
-    // Standard K/V split (legacy geminifs_batched_read/write analogue).
+    // Standard K/V split.
     //
     // One element per block: (k_regions[i], v_regions[i]) are written to
     // / read from block i at this layer's K and V byte offsets.  All

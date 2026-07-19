@@ -293,10 +293,9 @@ obtained from the registry. The `backend_private` field lets backends
 stash a private handle (e.g. `LocalNvmeDevice*`) to navigate back to
 concrete state.
 
-> **Note**: There are currently two `device.h` headers with the same
-> include guard — one in `coordinator/include/` (used) and one in
-> `runtime/include/` (unused, has `backend`/`queues` hooks). This is a
-> known issue to be resolved in the restructuring.
+> **Note**: Resolved — `runtime/` has been deleted (see §9 item 1).
+> `Device` now has a single canonical definition here in
+> `coordinator/include/`; there is no longer a duplicate `device.h`.
 
 ### 4.2 MemoryRegion
 
@@ -445,7 +444,7 @@ before calling submit).
 | `MANAGED` | cudaMallocManaged | Yes (unified VA) | Yes |
 | `EXTERNAL` | App-supplied (IPC/shm/slab) | Per ExternalMemorySpec | Per source |
 
-### 7.2 IO-Slice Table (R7)
+### 7.2 IO-Slice Table
 
 At `register_tensor()` time, the memory layer pre-computes:
 1. Split tensor into `granularity`-byte slices

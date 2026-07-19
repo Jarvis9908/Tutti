@@ -7,7 +7,7 @@
  *
  * Layer: Device Manager.
  *
- * Naming note (R4.5):
+ * Naming note:
  *   This used to be `LocalNvmeBlockDevice`.  In the eight-layer
  *   architecture the word "Block" is reserved for the
  *   block_storage/ layer (virtual block-handle composed of N
@@ -67,7 +67,7 @@ struct LocalNvmeDevice {
     nvm_ctrl_t*  ctrl = nullptr;
     LocalNvmeAttachMode attach_mode = LocalNvmeAttachMode::DIRECT;
 
-    // ---- libnvm C++ wrapper for GPU-side d_qps[] (R5b) ----
+    // ---- libnvm C++ wrapper for GPU-side d_qps[] ----
     //
     // When set, owns a NvmeQueueGroup that wraps `ctrl` above and
     // exposes `d_qps()` -- the GPU-resident QueuePair[] kernels use

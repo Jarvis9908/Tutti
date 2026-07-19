@@ -4,17 +4,15 @@
 /**
  * io_engine.h -- host-side IO submission SPI.
  *
- * Layer: io_engine (top-level interface).  Built on R5b/R6/R7 plus
- * the R8.1 host_batch_builder + R8.2 nvme_batch_xfer_kernel data
- * plane.
- *
- * Spec: doc/refactor/R8_io_engine_plan.md §5 (R8.3 milestone).
+ * Layer: io_engine (top-level interface).  Built on device_manager /
+ * block_storage / memory plus the host_batch_builder +
+ * nvme_batch_xfer_kernel data plane.
  *
  * Role:
  *   IIoEngine is the single host-side entry point for callers that
  *   want to submit a batch of NVMe IOs against memory-registered
  *   tensors and block_storage GpuFile shards.  The runtime / examples
- *   / R9 Coordinator hold an IIoEngine* and never touch
+ *   / Coordinator hold an IIoEngine* and never touch
  *   build_nvme_batch / launch_nvme_batch_xfer directly.
  *
  *   Lower-level callers that need to manage their own scratch buffer

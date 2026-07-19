@@ -1,19 +1,18 @@
 /**
  * kv_cache_adapter_smoke.cu -- end-to-end smoke for KvCacheIoAdapter.
  *
- * Proves the gaps closed on top of the generic io_engine + the
+ * Exercises the generic io_engine's per-layer K/V handling through the
  * transparent runtime-owned handle model:
- *   D1  per-layer K/V byte-offset semantics (legacy
- *       geminifs_batched_xfer) live in adapters/kv_cache.
- *   D2  auto-chunking: max_entries_per_batch is set DELIBERATELY SMALL
+ *   - per-layer K/V byte-offset semantics live in adapters/kv_cache.
+ *   - auto-chunking: max_entries_per_batch is set DELIBERATELY SMALL
  *       (2) while each per-layer batch flattens to 4 entries
  *       (kNumBlocks * {K,V}), so every layer submit is split into two
  *       engine batches by the adapter.
- *   ID  files are addressed by stable GpuFileId only; the Coordinator
+ *   - files are addressed by stable GpuFileId only; the Coordinator
  *       lazily acquires + caches the device handle (handle_for).  The
  *       test drops the cache mid-run and re-reads by id to prove the
  *       handle rebuilds from the persistent id alone.
- *   SYNC coord.sync_file(id) is the durability point after writes.
+ *   - coord.sync_file(id) is the durability point after writes.
  *
  * Scenario (KV-cache shaped):
  *   blocks   = 2  (each block == one GpuFile)
@@ -340,7 +339,7 @@ int main(int argc, char** argv) {
         if (!coord.sync_file(file_ids[b], stream)) STEP_FAIL("sync_file id=%u", file_ids[b]);
     STEP_OK("WRITE by id over %u layers + sync_file per block (durability point)", kLayers);
 
-    // verify shards via host pread.  R11.5: read_blocking uses O_DIRECT
+    // verify shards via host pread.  read_blocking uses O_DIRECT
     // (bypasses page cache), so no posix_fadvise cache-drop is needed.
     {
         AlignedBuf got(kTensorSize);

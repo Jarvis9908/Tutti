@@ -7,18 +7,17 @@
  *
  * Layer: Memory.
  *
- * R4.5 changes (vs the original R3 cut):
- *   - Constructor no longer takes a single nvm_ctrl_t*.  The
- *     subsystem now serves multiple devices; DMA mappings are
+ * Design notes:
+ *   - The constructor does not take a single nvm_ctrl_t*.  The
+ *     subsystem serves multiple devices; DMA mappings are
  *     tracked per (region_id, Device*).  Coordinator is expected
  *     to wire each Device in via register_tensor() (whose
  *     bound devices drives mapping creation).
- *   - prepare_nvme_dma() / prepare_rdma_mr() are gone.  DMA
+ *   - There is no prepare_nvme_dma() / prepare_rdma_mr().  DMA
  *     mapping happens implicitly during register_tensor().
- *   - set_descriptor_format() / descriptor_format() implemented.
- *     PRP/SGL builder lives in v0.1 as a Unimplemented stub
- *     (descriptor_slice returns false); the real builder lands
- *     in R7 (PRP) / R8 (SGL).
+ *   - set_descriptor_format() / descriptor_format() are implemented.
+ *     descriptor_slice() ships as an Unimplemented stub in v0.1
+ *     (returns false); the real PRP/SGL builder is future work.
  *
  * Coverage in v0.1
  *   - allocate_host(HOST | PINNED_HOST)        => malloc / cudaMallocHost

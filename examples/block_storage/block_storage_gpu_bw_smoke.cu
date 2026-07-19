@@ -1,8 +1,8 @@
 /**
  * block_storage_gpu_bw_smoke.cu -- GpuFile end-to-end bandwidth +
- * compute/IO overlap demo (R6.4 prototype, includes R7-track logic).
+ * compute/IO overlap demo.
  *
- * Layer: block_storage tests (R6 hot path under realistic load).
+ * Layer: block_storage tests (hot path under realistic load).
  *
  * Goals (set by user, demo deck):
  *   - 4 NVMe drives -> one big GpuFile (num_shards = 4).
@@ -14,20 +14,19 @@
  *   - Concurrent GPU compute + IO on two streams: confirm they
  *     overlap (read kernel || compute kernel <= max(serial)).
  *
- * R6 layering caveat (READ THIS):
+ * Layering caveat (READ THIS):
  *   - tensor_size = 128 KiB > 2 NVMe pages, so each NVMe IO needs
  *     a full PRP list (NVMe spec: prp1 = data_page[0] IOVA;
  *     prp2 = IOVA of a 4 KiB page packing the remaining
  *     data_page[1..N-1] IOVAs as little-endian uint64_t entries).
- *   - PRP-list construction is the R7 `memory/` layer's job once
- *     descriptor_slice / register_tensor land.  This smoke
- *     prototypes that logic IN-FILE (build_prp_lists() below) so
- *     we can ship the bandwidth number now.  When R7 lands, the
- *     prototype goes away and io_engine pulls PRPMappingEntry
- *     tables straight from memory/.
+ *   - PRP-list construction is `memory/`'s job via
+ *     descriptor_slice / register_tensor.  This smoke prototypes
+ *     that logic IN-FILE (build_prp_lists() below) instead of going
+ *     through io_engine's PRPMappingEntry tables, so it can measure
+ *     bandwidth independently of that path.
  *   - block_storage's public surface is unchanged.  We only
- *     consume R6.3's GpuFileHandle::d_shards_host[] and the
- *     R5b `submit_read_one(prp1, prp2)` device entry-point.
+ *     consume GpuFileHandle::d_shards_host[] and the
+ *     `submit_read_one(prp1, prp2)` device entry-point.
  *
  * Layout (defaults; CLI tunable):
  *
@@ -449,7 +448,7 @@ int main(int argc, char** argv) {
     STEP_OK("packed + uploaded PRP-list pages (%u/shard, %u entries each)",
             tensors_per_shard, kPagesPerTensor - 1);
 
-    // [9] configure the async handle pool (R11) + acquire_device_handle.
+    // [9] configure the async handle pool + acquire_device_handle.
     //     Stream = default (nullptr/0); this smoke launches its actual
     //     IO kernels on dedicated streams (s_io/s_cmp, created later)
     //     that have no inherent ordering vs. stream 0, so synchronize
@@ -468,7 +467,7 @@ int main(int argc, char** argv) {
     // 32768 4 KiB blocks (= 128 MiB), so any file > 128 MiB has at
     // least one logical-extent boundary; an NVMe IO that crosses
     // such a boundary makes submit_read_one's resolve_lba return
-    // false (R5b deliberately handles only single-extent IOs --
+    // false (it deliberately handles only single-extent IOs --
     // cross-extent splitting belongs in a later layer).  This
     // smoke is bandwidth-focused, so we filter out the few IOs
     // that would straddle a boundary; the bandwidth numbers below
@@ -487,7 +486,7 @@ int main(int argc, char** argv) {
         uint64_t cum = 0;
         for (std::size_t i = 0; i < exts.size(); ++i) {
             uint64_t bytes = exts[i].length_blocks * kNvmeBlockSize;
-            // R11.5: no in-band header prefix -- user data starts at
+            // No in-band header prefix -- user data starts at
             // byte 0, so every extent byte is payload.
             cum += bytes;
             shard_ext_boundaries[s].push_back(cum);

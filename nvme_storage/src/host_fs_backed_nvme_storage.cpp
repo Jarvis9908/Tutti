@@ -269,7 +269,7 @@ bool HostFsBackedNvmeStorage::umount_locked(PerDeviceState& s) {
 }
 
 // ---------------------------------------------------------------------------
-// C0 reconcile (R5a.1)
+// C0 reconcile
 // ---------------------------------------------------------------------------
 //
 // Background:
@@ -290,8 +290,8 @@ bool HostFsBackedNvmeStorage::umount_locked(PerDeviceState& s) {
 //   anyone calls create_file / open_file.
 //
 //   Not crash-safe in itself; if we crash mid-reconcile we just rerun
-//   on next bootstrap.  C1/C2 (TOMBSTONE / WAL) in Todolist would
-//   make every step intent-logged so the window vanishes entirely.
+//   on next bootstrap.  A future intent-log (write-ahead log) around
+//   create/delete would close this window entirely.
 bool HostFsBackedNvmeStorage::reconcile_locked_(PerDeviceState& s) {
     namespace fs = std::filesystem;
 
@@ -315,7 +315,7 @@ bool HostFsBackedNvmeStorage::reconcile_locked_(PerDeviceState& s) {
         std::string fn  = p.filename().string();
         if (fn == "file_log.bin" || fn == "file_log.bin.tmp") continue;
         // Sibling layers are allowed to drop their own sidecar logs
-        // under the same .tutti/ directory.  block_storage (R6) puts
+        // under the same .tutti/ directory.  block_storage puts
         // gpu_file_log.bin here -- we must not treat it as a ghost
         // NvmeFile, otherwise bootstrap would silently nuke it and
         // every GpuFile entry would disappear on the next start.
@@ -369,8 +369,8 @@ bool HostFsBackedNvmeStorage::reconcile_locked_(PerDeviceState& s) {
             "[nvme_storage] reconcile: removed ghost '%s'\n", abs.c_str());
     }
 
-    // 4b. R11.5 refs cleanup: unlink .tutti/.refs/<name>.bin entries
-    //     whose name is no longer in the log (orphans left by a
+    // 4b. Dangling ref cleanup: unlink .tutti/.refs/<name>.bin entries
+    //     whose name is not in the log (orphans left by a
     //     delete_file that crashed after unlinking the original but
     //     before log.persist, or by an external rm of the original
     //     path that the tombstone sweep above then dropped from the
@@ -550,7 +550,7 @@ bool HostFsBackedNvmeStorage::shutdown() {
     for (auto it = states_.rbegin(); it != states_.rend(); ++it) {
         PerDeviceState& s = **it;
 
-        // R11.5: no held fds to close.  Data IO is O_DIRECT / GPU-
+        // No held fds to close.  Data IO is O_DIRECT / GPU-
         // direct (no page cache); umount(2) itself syncs the
         // filesystem, flushing any fallocate metadata left by the
         // NO_SYNC bulk-init path.  flush_metadata() is the explicit
@@ -618,12 +618,12 @@ bool HostFsBackedNvmeStorage::create_file_locked(
     if (name.empty() || size_bytes == 0) return false;
 
     // The sole caller (open_file's NVME_OPEN_CREATE branch) confirms
-    // the name is NOT in the log under mtx_ before calling us.  R11.5:
-    // the FS operations below run WITHOUT mtx_ (so bulk-create can
+    // the name is NOT in the log under mtx_ before calling us.  The
+    // FS operations below run WITHOUT mtx_ (so bulk-create can
     // parallelize); the bookkeeping section re-acquires mtx_.  Caller
     // must not create the same name from two threads simultaneously.
 
-    // R11.5: no in-band header.  User data starts at byte 0.
+    // No in-band header.  User data starts at byte 0.
     // All metadata lives in PersistentFileLog (the authoritative
     // source); the on-disk file is pure user data.
     const std::string host_path = s.mount_path + "/.tutti/" +
@@ -671,7 +671,7 @@ bool HostFsBackedNvmeStorage::create_file_locked(
         return false;
     }
 
-    // R11.5: create a hardlink ref under .tutti/.refs/ so that an
+    // Create a hardlink ref under .tutti/.refs/ so that an
     // external `rm` of the original path does NOT free the inode
     // (nlink stays 1 via the ref).  This guarantees the LBA extents
     // stay valid for any GPU kernel still reading through them --
@@ -700,14 +700,14 @@ bool HostFsBackedNvmeStorage::create_file_locked(
         return false;
     }
 
-    // R11.5: close fd immediately -- NvmeFile no longer holds it.
+    // Close fd immediately -- NvmeFile does not hold it.
     // Host-side IO (read_blocking / write_blocking / sync) opens a
     // temporary fd via refs_path on demand.  This eliminates fd
     // exhaustion at 1M+ file scale.
     ::close(fd);
 
     // --- Bookkeeping (mutex-protected) ---
-    // R11.5: the FS operations above (open/fallocate/fsync/fiemap/
+    // The FS operations above (open/fallocate/fsync/fiemap/
     // linkat/close) ran WITHOUT mtx_ so bulk-create can parallelize
     // across threads.  Re-acquire the lock only for the in-memory
     // state mutation (log, files map, dirty flags).
@@ -764,7 +764,7 @@ bool HostFsBackedNvmeStorage::create_file_locked(
         nf->extents     = fr.extents;
         nf->host_path   = host_path;
         nf->refs_path   = refs_path;
-        nf->data_offset = 0;   // R11.5: no header prefix
+        nf->data_offset = 0;   // no header prefix
         NvmeFile* raw = nf.get();
         s.files[fid] = std::move(nf);
         *out = raw;
@@ -849,15 +849,15 @@ NvmeFile* HostFsBackedNvmeStorage::open_file(const Device* dev,
         NvmeFile* out = nullptr;
         const bool persist_now = !(flags & NVME_OPEN_NO_PERSIST);
         const bool sync_now    = !(flags & NVME_OPEN_NO_SYNC);
-        // R11.5: release the lock during create so the FS operations
+        // Release the lock during create so the FS operations
         // (open/fallocate/fiemap/linkat) run without mtx_ -- bulk-create
         // can parallelize across threads.  create_file_locked
         // re-acquires mtx_ internally for the bookkeeping section.
         lock.unlock();
         if (!create_file_locked(*s, name, create_size, persist_now, sync_now, &out))
             return nullptr;
-        // R11.5: admit is lazy -- deferred to the first
-        // acquire_device_handle cold miss (it does the same
+        // Admission into the device-handle cache is lazy -- deferred
+        // to the first acquire_device_handle cold miss (it does the same
         // build_handle_template_ there).  Avoids per-create CUDA
         // overhead during bulk init.
         return out;
@@ -874,12 +874,12 @@ NvmeFile* HostFsBackedNvmeStorage::open_file(const Device* dev,
     // Already in memory?
     auto it = s->files.find(e->file_id);
     if (it != s->files.end()) {
-        // R11.5: no fd to re-open -- NvmeFile is metadata-only.
+        // No fd to re-open -- NvmeFile is metadata-only.
         return it->second.get();
     }
 
     // Not in memory yet; reconstruct NvmeFile from log entry.
-    // R11.5: do NOT open a host fd -- the file is metadata-only.
+    // Do NOT open a host fd -- the file is metadata-only.
     // Host-side IO opens a temporary fd via refs_path on demand.
     std::string host_path = s->mount_path + "/.tutti/" + nm + ".bin";
     std::string refs_path = s->mount_path + "/.tutti/.refs/" + nm + ".bin";
@@ -891,7 +891,7 @@ NvmeFile* HostFsBackedNvmeStorage::open_file(const Device* dev,
     nf->extents     = e->extents;
     nf->host_path   = host_path;
     nf->refs_path   = refs_path;
-    nf->data_offset = 0;   // R11.5: no header prefix
+    nf->data_offset = 0;   // no header prefix
     NvmeFile* raw = nf.get();
     s->files[e->file_id] = std::move(nf);
     return raw;
@@ -904,7 +904,7 @@ bool HostFsBackedNvmeStorage::open_files_batch(
     if (specs == nullptr || out == nullptr) return false;
     for (uint32_t i = 0; i < count; ++i) out[i] = nullptr;
 
-    // R11.5: spawn worker threads calling open_file() concurrently.
+    // Spawn worker threads calling open_file() concurrently.
     // open_file briefly locks mtx_ to check the log, releases it during
     // the FS operations (fallocate/fiemap/linkat), and re-acquires it
     // only for the in-memory bookkeeping -- so N threads genuinely
@@ -950,7 +950,7 @@ bool HostFsBackedNvmeStorage::close_file(NvmeFile* file) {
     auto* s = find_state(file->device);
     if (s == nullptr) return false;
 
-    // R11.5: NvmeFile is metadata-only (no held fd) and stays resident
+    // NvmeFile is metadata-only (no held fd) and stays resident
     // in s->files until delete_file.  close_file is therefore a no-op:
     //   - no fd to fsync/close,
     //   - no cache entry to evict (the handle template stays admitted
@@ -973,15 +973,16 @@ bool HostFsBackedNvmeStorage::delete_file(NvmeFile* file,
     std::string host_path = file->host_path;
     std::string refs_path = file->refs_path;
 
-    // R11.3: drop any GPU-resident (L1) / CPU-resident (L2) handle
+    // Drop any GPU-resident (L1) / CPU-resident (L2) handle
     // cache entry BEFORE the NvmeFile object itself is destroyed
     // below (s->files.erase invalidates `file`).
     erase_from_metadata_cache_(file);
 
-    // R11.5: no held fd to close.  Unlink BOTH the original path and
+    // No held fd to close.  Unlink BOTH the original path and
     // the .refs/ hardlink so the inode is actually freed (nlink -> 0).
     // Tolerate ENOENT on either (external rm may have beaten us to
-    // the original path; the refs may not exist for pre-R11.5 files).
+    // the original path; the refs may not exist for files created
+    // before the .refs/ hardlink scheme was introduced).
     if (::unlink(host_path.c_str()) != 0 && errno != ENOENT) {
         std::fprintf(stderr,
             "[nvme_storage] unlink(%s): errno %d\n",
@@ -1121,7 +1122,7 @@ ssize_t HostFsBackedNvmeStorage::read_blocking(NvmeFile* file,
         errno = EINVAL;
         return -1;
     }
-    // R11.5: open a temporary O_DIRECT fd via refs_path (the durable
+    // Open a temporary O_DIRECT fd via refs_path (the durable
     // hardlink) for this IO, then close it.  O_DIRECT bypasses the
     // page cache -- caller MUST provide a block-aligned buffer, offset,
     // and length (EINVAL otherwise).  NvmeFile no longer holds a fd.
@@ -1165,7 +1166,7 @@ ssize_t HostFsBackedNvmeStorage::write_blocking(NvmeFile* file,
         errno = EINVAL;
         return -1;
     }
-    // R11.5: open a temporary O_DIRECT fd via refs_path for this IO.
+    // Open a temporary O_DIRECT fd via refs_path for this IO.
     // O_DIRECT bypasses the page cache (data goes straight to platter);
     // caller MUST provide a block-aligned buffer, offset, and length
     // (EINVAL otherwise).
@@ -1199,7 +1200,7 @@ ssize_t HostFsBackedNvmeStorage::write_blocking(NvmeFile* file,
 
 bool HostFsBackedNvmeStorage::sync(NvmeFile* file) {
     if (file == nullptr) return false;
-    // R11.5: open a temporary fd via refs_path, fsync, close.
+    // Open a temporary fd via refs_path, fsync, close.
     const std::string& path = !file->refs_path.empty()
                                   ? file->refs_path : file->host_path;
     int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);

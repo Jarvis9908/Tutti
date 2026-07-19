@@ -1,4 +1,4 @@
-# coordinator/ -- Tutti top-level orchestrator (R9).
+# coordinator/ -- Tutti top-level orchestrator.
 #
 # Owns one instance of every layer below it and sequences bring-up /
 # tear-down:

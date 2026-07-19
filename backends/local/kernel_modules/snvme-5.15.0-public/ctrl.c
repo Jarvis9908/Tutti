@@ -28,10 +28,6 @@ struct ctrl* ctrl_get(struct list* list, struct class* cls, struct pci_dev* pdev
     ctrl->rdev = 0;
     ctrl->cls = cls;
     ctrl->chrdev = NULL;
-    ctrl->use_sreg = 0;
-    ctrl->ioq_num = 0;
-    ctrl->ioq_map_num = 0;
-    ctrl->cq_num = 0;
     /* B3 queue-budget snapshot + user-QID pool (Chunk A fields). */
     memset(&ctrl->setup, 0, sizeof(ctrl->setup));
     ctrl->user_qid_bitmap = NULL;

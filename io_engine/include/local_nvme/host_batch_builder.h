@@ -6,20 +6,15 @@
  *
  * Layer: io_engine, local_nvme backend.  Pure host-side helper.
  *
- * Spec: doc/refactor/R8_io_engine_plan.md §3.4.
- *
- * Mirrors the legacy monolithic batched-xfer host loop
- * (fill_ctx + outer flatten) from the pre-refactor GPU-file path.
- *
  * What it does NOT do:
  *   - allocate the output buffer (caller passes pre-sized array)
  *   - copy the result to GPU (caller cudaMemcpyAsync's after build)
- *   - launch any kernel (R8.2 lands the kernel + the cudaMemcpy
- *     orchestration on top of this builder).
+ *   - launch any kernel (that lives in launch_batch.h + the
+ *     nvme_batch_xfer_kernel on top of this builder's output).
  *
- * That keeps R8.1 a pure CPU correctness step: smoke tests can
- * field-by-field compare the output against the legacy formula
- * without involving any CUDA stream, kernel, or PRP submission.
+ * Keeping this a pure CPU step lets smoke tests field-by-field
+ * compare the output against a reference formula without involving
+ * any CUDA stream, kernel, or PRP submission.
  */
 
 #include <cstdint>
@@ -48,14 +43,13 @@ struct NvmeBatchInputTensor;
 ///   prp_idx MUST be the tensor-global running index.  Using
 ///   slice-local k would only work coincidentally when the tensor
 ///   has exactly one IoSliceView (granularity == tensor_size).
-///   See R8_io_engine_plan.md §3.1 step 3a.
 ///
-/// @param mem            R7 memory subsystem; needed for list_io_slices().
+/// @param mem            memory subsystem; needed for list_io_slices().
 /// @param inputs         Input tensors with their GpuFile shard handles
 ///                       and per-tensor base byte offsets.
 /// @param is_read        Direction; copied into every emitted entry's
 ///                       is_read field (per-entry direction is reserved
-///                       for future use; R8.2 kernel reads the batch-
+///                       for future use; the kernel reads the batch-
 ///                       uniform direction parameter).
 /// @param out_entries    Caller-owned host-side array of length
 ///                       `out_capacity`.

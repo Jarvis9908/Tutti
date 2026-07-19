@@ -436,3 +436,84 @@ After restructuring:
 6. **Kernel module builds via DKMS on 5.4 and 5.15**.
 7. **All existing smoke tests pass** with no behavior change.
 8. **GDS backend works** as proof that the SPI supports a second backend.
+
+## 10. Long-Term Vision and Candidate Framework Support (Exploratory)
+
+> **Status**: Exploratory. Unlike §1-§9 (confirmed decisions), this
+> section sketches a longer-horizon target and candidate framework
+> integrations. Nothing here is committed — each item still requires
+> its own RFC and maintainer sign-off per `CONTRIBUTING.md` ("When an
+> RFC or Design Discussion Is Required") before implementation begins.
+
+### 10.1 End-State Architecture (Beyond Phase 7)
+
+Once Phases 1-7 land, the runtime reaches the following steady-state
+shape. This is the union of what every design document already
+targets, not a new decision:
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│  adapters/        (LMCache, Mooncake, + candidates in §10.2)   │
+├───────────────────────────────────────────────────────────────┤
+│  api/             (stable application-facing headers)          │
+├───────────────────────────────────────────────────────────────┤
+│  coordinator/       memory/         device_manager/            │
+├───────────────────────────────────────────────────────────────┤
+│  filesystems/     (ext4_fiemap, tutti_layout, dfs_client,       │
+│                     raw_passthrough)                            │
+├───────────────────────────────────────────────────────────────┤
+│  io_engine/       (generic IBackendProvider SPI)                │
+├───────────────────────────────────────────────────────────────┤
+│  accel/           (IAccelerator: cuda, rocm, sycl, cann)        │
+├───────────────────────────────────────────────────────────────┤
+│  backends/        (local_nvme, gds, local_rdma, ...)            │
+└───────────────────────────────────────────────────────────────┘
+```
+
+Every layer above already has a design doc or a phase in this plan
+except the specific adapter list, which is intentionally open — see
+§10.2.
+
+### 10.2 Candidate Upper-Layer Framework Adapters
+
+`adapters/` today only commits to `LMCache` and `Mooncake`
+(`Roadmap.md` Phase 6). Beyond those, the following are candidates a
+contributor could open an RFC for; listing them here is not a
+commitment to build any of them:
+
+| Framework | Integration point | Notes |
+|---|---|---|
+| vLLM | Direct KV-cache swap-out/in (analyzed in [backend-spi.md](../design/backend-spi.md) §7.3) | Primary workload already analyzed; no adapter implemented yet |
+| SGLang | KV-cache offload, same shape as vLLM | Would likely reuse most of `KvCacheIoAdapter` |
+| TensorRT-LLM | KV-cache paging to storage | Needs its own tensor-registration glue |
+| Triton Inference Server | Model / state checkpoint spill to NVMe | Different IO pattern (large sequential, not KV blocks) |
+| DeepSpeed-Inference / ZeRO-Offload | Parameter / optimizer-state offload | Batch pattern differs from KV cache (larger, less frequent) |
+| Ray / Ray Serve | Object spilling to NVMe-backed storage | Would use the raw `StorageTarget` path ([storage-extensibility.md](../design/storage-extensibility.md) §5), not the KV adapter |
+
+### 10.3 Candidate Accelerator Vendors
+
+Tracked in detail in [gpu-abstraction.md](../design/gpu-abstraction.md);
+restated here for visibility of the long-term target:
+
+| Vendor | Framework | Status |
+|---|---|---|
+| NVIDIA | CUDA | v0.1 baseline (only vendor supported today) |
+| AMD | ROCm | Candidate — gpu-abstraction.md Phase 4 proposes a proof-of-concept |
+| Intel | oneAPI / SYCL | Candidate — different compilation model, needs its own design pass |
+| Huawei | CANN (Ascend) | Candidate — needs a vendor-specific DMA-mapping equivalent (gpu-abstraction.md §2.5) |
+
+### 10.4 Candidate Distributed Filesystem Clients
+
+Tracked in detail in [storage-extensibility.md](../design/storage-extensibility.md)
+§7.5; restated here: `3FS`, `JuiceFS`, `DAOS`, `CephFS`. Each requires
+its own `filesystems/dfs_client/<name>/` implementation and is
+independent work — landing one does not require landing the others.
+
+### 10.5 Governance Note
+
+Every item in §10.2-§10.4 requires, before any code lands:
+
+1. A design discussion / RFC per `CONTRIBUTING.md`.
+2. Explicit maintainer approval before the directory is created.
+3. Its own `doc/design/` entry once approved — this section is a index
+   of candidates, not a substitute for that.

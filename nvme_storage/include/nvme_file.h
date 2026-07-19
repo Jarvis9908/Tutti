@@ -7,15 +7,15 @@
  * Layer: nvme_storage.  This is what callers (block_storage, smokes)
  * hold after a successful create_file / open_file.
  *
- * R11.5: NvmeFile is now metadata-only -- it does NOT hold a host fd.
+ * NvmeFile is metadata-only -- it does NOT hold a host fd.
  * The file's physical LBA layout (extents) is read once at create
  * time via FIEMAP and cached here permanently (extents don't change
  * on ext4 after fallocate).  Host-side IO (read_blocking / write_
  * blocking / sync) opens a temporary fd via `refs_path` on demand
  * and closes it immediately after -- see host_fs_backed_nvme_storage.cpp.
  *
- * The on-disk file no longer has a 4 KiB header prefix (R11.5 removed
- * pwrite(header)); user data starts at byte 0.  All metadata lives in
+ * The on-disk file has no header prefix; user data starts at byte 0.
+ * All metadata lives in
  * PersistentFileLog, not in-band.
  *
  * A hardlink under `.tutti/.refs/<name>.bin` acts as an inode
@@ -27,7 +27,7 @@
  * Lifetime:
  *   - Created and owned by INvmeStorage.
  *   - Destroyed via INvmeStorage::delete_file().
- *   - close_file() is now a no-op (no fd to close, no cache to erase).
+ *   - close_file() is a no-op (no fd to close, no cache to erase).
  *   - Holders MUST NOT delete; the storage handles that.
  */
 

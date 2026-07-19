@@ -419,16 +419,15 @@ add_subdirectory(device_manager)
 add_subdirectory(nvme_storage)
 
 # block_storage layers GpuFile / shard-striping abstractions on top of
-# nvme_storage.  R6.1 ships the interface + a pure resolve helper as a
-# header-only INTERFACE library; R6.2/R6.3 will add the impl.
+# nvme_storage: the interface + a pure resolve helper as a header-only
+# INTERFACE library, plus the host/GPU-side implementation.
 add_subdirectory(block_storage)
 
 # io_engine layers batch IO orchestration on top of memory + block_storage
-# + nvme_storage.  R8.1 ships the host-side batch builder + a CPU-only
-# smoke (build & validate, no kernel).  R8.2 adds the GPU kernel.
+# + nvme_storage: the host-side batch builder + the GPU kernel.
 add_subdirectory(io_engine)
 
-# coordinator/ is the top-level orchestrator (R9): one Coordinator owns
+# coordinator/ is the top-level orchestrator: one Coordinator owns
 # the registry -> nvme_storage -> block_storage -> memory -> io_engine
 # chain and exposes high-level bootstrap / create_gpu_file /
 # register_tensor / submit_batch.  Must be added AFTER all the layers
@@ -436,13 +435,13 @@ add_subdirectory(io_engine)
 add_subdirectory(coordinator)
 
 # adapters/ holds framework-facing integration layers that compose the
-# core runtime without polluting it.  kv_cache reconstructs the legacy
-# GeminiFS per-layer K/V offset + auto-chunking semantics on top of the
+# core runtime without polluting it.  kv_cache implements the
+# per-layer K/V byte-offset + auto-chunking semantics on top of the
 # generic io_engine (Roadmap.md "Adapter Layer").  Added after the
 # coordinator it links against, before the examples that exercise it.
 add_subdirectory(adapters/kv_cache)
 
-# examples/ holds the end-to-end smokes (R9).  e2e_smoke drives the
+# examples/ holds the end-to-end smokes.  e2e_smoke drives the
 # whole stack through the Coordinator.  Added last so every layer +
 # the coordinator target is already declared.
 add_subdirectory(examples)

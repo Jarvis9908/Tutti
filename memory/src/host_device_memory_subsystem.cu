@@ -4,11 +4,11 @@
  *
  * See host_device_memory_subsystem.h for the design rationale.
  *
- * R4.5 changes vs the original R3 cut:
+ * Design notes:
  *   - No nvm_ctrl_t* in the constructor; DMA mappings are tracked
  *     per-(region, Device*) and are created on demand by
  *     register_tensor() walking bound devices.
- *   - prepare_nvme_dma() / prepare_rdma_mr() are gone.
+ *   - There is no prepare_nvme_dma() / prepare_rdma_mr().
  *   - set_descriptor_format() and descriptor_slice() are wired up
  *     (the latter as an Unimplemented stub).
  */
@@ -1596,10 +1596,10 @@ bool HostDeviceMemorySubsystem::query_nvme_mapping(
     std::size_t*        out_page_size,
     uint64_t*           out_first_ioaddr) const
 {
-    // `device` is retained for ABI compatibility with R4.5 callers
-    // but ignored in R7+: each region has a single cluster-wide
-    // nvm_dma_t whose ioaddrs[] are usable from every cluster-bound
-    // ctrl (see Slot::data_dma deployment contract).
+    // `device` is retained for API compatibility but otherwise
+    // unused: each region has a single cluster-wide nvm_dma_t whose
+    // ioaddrs[] are usable from every cluster-bound ctrl (see
+    // Slot::data_dma deployment contract).
     (void)device;
     if (region == nullptr) return false;
 

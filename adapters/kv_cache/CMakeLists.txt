@@ -1,8 +1,8 @@
 # adapters/kv_cache/ -- KV-cache semantics adapter (framework-facing).
 #
-# Reconstructs the legacy GeminiFS per-layer K/V byte-offset formula
-# and auto-chunking on top of the generic Tutti io_engine, so the core
-# runtime stays framework-agnostic (Roadmap.md "Adapter Layer").
+# Implements the per-layer K/V byte-offset formula and auto-chunking
+# on top of the generic Tutti io_engine, so the core runtime stays
+# framework-agnostic (Roadmap.md "Adapter Layer").
 #
 # Pure host C++ (no CUDA device code): it only builds
 # NvmeBatchInputTensor lists and calls Coordinator::submit_batch.

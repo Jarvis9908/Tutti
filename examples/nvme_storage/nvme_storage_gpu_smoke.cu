@@ -1,5 +1,5 @@
 /**
- * nvme_storage_gpu_smoke.cu -- end-to-end GPU device-side submit (R5b).
+ * nvme_storage_gpu_smoke.cu -- end-to-end GPU device-side submit.
  *
  * Layer: nvme_storage tests.
  *
@@ -395,7 +395,7 @@ int main(int argc, char** argv) {
     STEP_OK("cudaMalloc(1 MiB) + nvm_dma_map_data_device per device "
             "(prp1[0]=0x%llx)", (unsigned long long)bufs[0].prp1);
 
-    // [7] configure the async handle pool (R11), then acquire_device_handle
+    // [7] configure the async handle pool, then acquire_device_handle
     //     per file.  Stream = default (nullptr/0) -- this smoke has no
     //     dedicated stream; the [9] cudaDeviceSynchronize below waits
     //     for the async H2D fills before the kernels that read them run
@@ -476,7 +476,7 @@ int main(int argc, char** argv) {
         }
         if (!storage->close_file(files[i])) STEP_FAIL("close_file(%zu)", i);
     }
-    // R11.3: release_device_handle is now advisory (keyed by NvmeFile*,
+    // release_device_handle is advisory (keyed by NvmeFile*,
     // not the recycled GPU handle pointer) -- it just hints the L1
     // slot may be downgraded sooner; nothing to synchronize on before
     // shutdown besides the usual "no outstanding kernels" assumption.

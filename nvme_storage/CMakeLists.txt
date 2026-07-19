@@ -60,7 +60,7 @@ set_target_properties(tutti_nvme_storage PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# Smoke tests live in the top-level examples/ tree (R9.4).
+# Smoke tests live in the top-level examples/ tree.
 # ---------------------------------------------------------------------------
 
 install(TARGETS tutti_nvme_storage      DESTINATION "lib")

@@ -2,7 +2,7 @@
 #define __TUTTI_COORDINATOR_COORDINATOR_H__
 
 /**
- * coordinator.h -- the top-level Tutti orchestrator (R9).
+ * coordinator.h -- the top-level Tutti orchestrator.
  *
  * Layer: Coordinator.  Owns one instance of every layer below it and
  * sequences their bring-up / tear-down so application code never has
@@ -32,12 +32,12 @@
  * drop_cached_handles / delete_gpu_file / sync_file) access this
  * layer's own last_handle_ / gpu_files_by_id_ maps without locking
  * and are therefore NOT thread-safe -- they must be driven from a
- * single control thread.  (R12 A-3 / 隐患-1: the data-plane
- * submit_batch is the only concurrent-safe entry point; the control
- * plane is single-threaded by design, matching the real call pattern
- * of a single scheduler thread orchestrating file lifecycle.)
+ * single control thread.  The data-plane submit_batch is the only
+ * concurrent-safe entry point; the control plane is single-threaded
+ * by design, matching the real call pattern of a single scheduler
+ * thread orchestrating file lifecycle.
  *
- * Bring-up mode (R9.6): cfg.mode selects which IDeviceRegistry sits
+ * Bring-up mode: cfg.mode selects which IDeviceRegistry sits
  * at the top of the chain -- IN_PROCESS (LocalNvmeDirectRegistry,
  * this process owns the NVMe) or SERVICE_CLIENT
  * (NvmeServiceBackedRegistry, attach via a running
@@ -132,7 +132,7 @@ public:
     /// whole-batch) rejection.
     bool           has_gpu_file(GpuFileId id) const;
 
-    /// `stream` is only used to order the async release (R11) of any
+    /// `stream` is only used to order the async release of any
     /// handle still cached for this file's id via `handle_for` --
     /// defaults to the legacy (implicit) stream 0 for callers that
     /// never touched the transparent handle cache for this file.
@@ -149,20 +149,19 @@ public:
     bool           delete_gpu_files_batch(GpuFile* const* files, uint32_t count,
                                           bool* out_ok, cudaStream_t stream = 0);
 
-    /// Async, pooled (R11): borrows a slot from block_storage's
-    /// GpuSlotPool and queues an async fill on `stream`; returns
-    /// immediately.  The returned handle's fields are only guaranteed
-    /// valid for GPU work queued on `stream` AFTER this call (ordinary
-    /// CUDA stream-ordering -- mirrors legacy GeminiFS's
-    /// cudaMemcpyAsync-then-kernel-launch pattern).  `delete_gpu_file`
-    /// also releases (async, on `stream`) any handle still cached for
-    /// that id via `handle_for` -- so pass the same stream you'll use
-    /// for the delete if you want a well-defined ordering there too.
+    /// Async, pooled: borrows a slot from block_storage's GpuSlotPool
+    /// and queues an async fill on `stream`; returns immediately.  The
+    /// returned handle's fields are only guaranteed valid for GPU work
+    /// queued on `stream` AFTER this call (ordinary CUDA
+    /// stream-ordering).  `delete_gpu_file` also releases (async, on
+    /// `stream`) any handle still cached for that id via `handle_for`
+    /// -- so pass the same stream you'll use for the delete if you
+    /// want a well-defined ordering there too.
     GpuFileHandle* acquire_device_handle(GpuFile* gf, cudaStream_t stream);
     void           release_device_handle(GpuFileHandle* h, cudaStream_t stream);
 
     // ------------------------------------------------------------------
-    // Transparent handle cache (id-keyed; async pooled R11.3)
+    // Transparent handle cache (id-keyed; async, pooled)
     //
     // The runtime -- not the caller -- owns GpuFile device-handle
     // lifetime.  Callers reference a file by its stable, persistent
@@ -172,7 +171,7 @@ public:
     // and makes crash recovery a matter of re-open_gpu_file(spec) ->
     // same id -> handle rebuilt on demand.
     //
-    // R11.3: GPU-residency caching/eviction is now owned by
+    // GPU-residency caching/eviction is owned by
     // block_storage / nvme_storage's own two-tier caches (see
     // memory/include/tiered_handle_cache.h), sized by
     // cfg.handle_l1_capacity / handle_l2_capacity.  This means
@@ -274,7 +273,7 @@ public:
     uint32_t batch_entry_count(MemoryRegion* region) const;
 
     // ------------------------------------------------------------------
-    // IO submission (R8.3 io_engine)
+    // IO submission (io_engine)
     // ------------------------------------------------------------------
 
     /// Submit a multi-tensor batch (uniform direction) and block until

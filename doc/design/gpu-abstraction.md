@@ -26,6 +26,24 @@ The following CUDA dependencies exist in **public interface headers**
 | `device_manager/include/nvme_queue_group.h` | `nvm_types.h`, QueuePair (libnvm) | Queue group CUDA-bound via libnvm |
 | `device_manager/include/local_nvme_device.h` | `nvm_types.h` (nvm_ctrl_t) | Device payload leaks libnvm |
 
+The following headers are not part of the top-level public API surface
+above, but still carry direct CUDA / libnvm dependencies and must be
+migrated in the same phases (Phase 1 for the `memory/` internals,
+Phase 3 for the `local_nvme/` ones once they move to
+`backends/local_nvme/`):
+
+| File | Dependency | Impact |
+|------|-----------|--------|
+| `io_engine/include/local_nvme/launch_batch.h` | `cuda_runtime.h`, `cudaStream_t` | Backend-private kernel-launch wrapper; moves to `backends/local_nvme/` (Phase 3) |
+| `io_engine/include/local_nvme/local_nvme_io_engine.h` | `cuda_runtime.h`, `cudaStream_t` | Backend-private IO engine impl; moves to `backends/local_nvme/` (Phase 3) |
+| `memory/include/memory_region.h` | `cuda_runtime.h` | `MemoryRegion::cuda_device` / pointer fields CUDA-bound |
+| `memory/include/cuda_helpers.cuh` | `cuda_runtime.h` | CUDA-only error-check macros; likely absorbed wholesale into `accel/cuda/`, not ported |
+| `memory/include/gpu_slot_pool.h` | `cuda_runtime.h` | GPU object pool alloc/free calls CUDA runtime directly |
+| `memory/include/host_slot_pool.h` | `cuda_runtime.h` | Pinned-host pool alloc/free calls CUDA runtime directly |
+| `memory/include/prp_page_cache.h` | `cuda_runtime.h` | Two-tier PRP page cache CUDA-bound |
+| `memory/include/tiered_handle_cache.h` | `cuda_runtime.h` | Two-tier handle cache CUDA-bound |
+| `memory/include/prp_list_pool.h` | `nvm_types.h` | PRP-list allocator leaks libnvm |
+
 The following CUDA dependencies exist in **implementation files** (can
 be isolated behind an abstraction):
 

@@ -24,8 +24,6 @@ struct map
     struct task_struct* owner;          /* Owner of mapping */
     u64                 vaddr;          /* Starting virtual address */
     struct list*        ctrl_list;
-    int                 is_cq;
-    int                 ioq_idx;
     int                 n_entries;
     struct pci_dev*     pdev;           /* Reference to physical PCI device */
     unsigned long       page_size;      /* Logical page size */
@@ -102,7 +100,6 @@ struct map* map_device_ioqueue_memory(struct list* list, const struct ctrl* ctrl
  * Find memory mapping from vaddr and current task
  */
 struct map* map_find(const struct list* list, u64 vaddr);
-struct map* map_find_by_pci_dev_and_idx(const struct list* list, const struct pci_dev* pdev, int idx, int is_cq);
 
 /*
  * snvme: purge every map whose ->owner matches the given task.
@@ -113,12 +110,6 @@ struct map* map_find_by_pci_dev_and_idx(const struct list* list, const struct pc
  * triggers map->release() (release_user_pages / nvidia_p2p_put_pages
  * / nvidia_p2p_free_dma_mapping), so this is safe to call from
  * file->release context where the process is on its way out.
- *
- * NB: caller is responsible for rolling back ctrl->ioq_map_num /
- * ctrl->cq_num counters that NVM_MAP_* paths bumped while populating
- * these maps -- map.c has no visibility into per-ctrl accounting.
- * The release hook in pci.c walks the list twice for that reason:
- * first to compute the rollback deltas, then to free.
  */
 unsigned long map_purge_by_owner(struct list* list, struct task_struct* owner);
 

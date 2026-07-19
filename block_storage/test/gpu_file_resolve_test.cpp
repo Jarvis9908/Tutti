@@ -1,12 +1,12 @@
-// gpu_file_resolve_test.cpp -- R6.1 unit test for gpu_file_resolve.
+// gpu_file_resolve_test.cpp -- unit test for gpu_file_resolve.
 //
 // Plain C++ host program (no CUDA, no nvme_storage); just exercises
 // the inline math in gpu_file_resolve.h to make sure the host- and
-// (future) device-side translations match what legacy
-// libgeminifs/gpu_controller.cu's `__get_nvmeofst` does.
+// (future) device-side translations agree with each other.
 //
-// We replicate legacy's intent in a reference function and assert
-// our helper produces identical output across a spread of shapes.
+// A reference implementation of the expected shard-resolution formula
+// is kept separately below, and the helper's output is asserted
+// identical to it across a spread of shapes.
 //
 // Build: hooked up via block_storage/CMakeLists.txt as the
 //   `block_storage_resolve_test` target.
@@ -21,9 +21,8 @@
 namespace {
 
 // ----------------------------------------------------------------------------
-// Reference: identical to the math at
-//   filesystems/ext4/libgeminifs/gpu_controller.cu:1567-1569,
-// for the (tensor_size-aligned) case we contractually require.
+// Reference: the expected shard-resolution formula for the
+// (tensor_size-aligned) case we contractually require.
 //
 // gpu_blk    = byte_off / tensor_size
 // shard_idx  = gpu_blk % num_shards

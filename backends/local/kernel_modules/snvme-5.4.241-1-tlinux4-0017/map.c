@@ -142,8 +142,6 @@ static struct map* create_descriptor(const struct ctrl* ctrl, u64 vaddr, unsigne
     map->data = NULL;
     map->release = NULL;
     map->n_addrs = n_pages;
-    map->ioq_idx = -1;
-    map->is_cq   = -1;
     for (i = 0; i < map->n_addrs; ++i)
     {
         map->addrs[i] = 0;
@@ -203,28 +201,6 @@ struct map* map_find(const struct list* list, u64 vaddr)
 
     return NULL;
 }
-
-struct map* map_find_by_pci_dev_and_idx(const struct list* list, const struct pci_dev* pdev, int idx, int is_cq)
-{
-    const struct list_node* element = list_next(&list->head);
-    struct map* map = NULL;
-
-    while (element != NULL)
-    {
-        map = container_of(element, struct map, list);
-
-
-        if (map->pdev == pdev && map->ioq_idx == idx && map->is_cq ==is_cq)
-        {
-            return map;
-        }
-        
-        element = list_next(element);
-    }
-
-    return NULL;
-}
-EXPORT_SYMBOL_GPL(map_find_by_pci_dev_and_idx);
 
 /*
  * snvme: walk `list` and unmap_and_release every descriptor whose

@@ -1,5 +1,5 @@
 /**
- * block_storage_smoke.cu -- R6.2 host-side end-to-end smoke for
+ * block_storage_smoke.cu -- host-side end-to-end smoke for
  * HostFsBackedBlockStorage.
  *
  * Steps:
@@ -231,7 +231,7 @@ int run(const tutti_examples::RegistryCliOptions& ropt)
     prime_cuda(ropt.cuda_dev);
 
     // [2] registry up -- IN_PROCESS or SERVICE_CLIENT.
-    //     build_queue_group=false: R6.2 host-only.
+    //     build_queue_group=false: host-only.
     auto reg = tutti_examples::open_registry(ropt, /*build_queue_group=*/false);
     if (reg.ptr == nullptr) STEP_FAIL("registry Open()");
     STEP_OK("registry up: mode=%s n=%zu", ropt.service_mode ? "service" : "direct", n_dev);

@@ -2,7 +2,7 @@
 #define __TUTTI_BLOCK_STORAGE_BLOCK_STORAGE_H__
 
 /**
- * block_storage.h -- the IBlockStorage interface (R6).
+ * block_storage.h -- the IBlockStorage interface.
  *
  * Layer: block_storage.  Sits *above* nvme_storage and *below*
  * io_engine.  See doc/refactor/LegacyDecomposition.md §3.4.
@@ -22,7 +22,7 @@
  *     at LMCache provisioning time stays sub-minute.
  *   - Provides `acquire_device_handle` / `release_device_handle` to
  *     bring all N shard NvmeFiles to GPU together; the returned
- *     GpuFileHandle is what io_engine (R8) consumes when it
+ *     GpuFileHandle is what io_engine consumes when it
  *     pre-stages a kernel batch (one GPUIoContext per IO; each ctx
  *     references handle->d_shards_dev so the kernel reads it
  *     directly without chasing host pointers).
@@ -34,7 +34,7 @@
  *     lives in nvme_storage/include/nvme_file_device_handle.h.)
  *   - The IO-submission hot path is NOT here.  This header only
  *     gives you metadata + acquired handles; the kernel-side
- *     translation/submit step lives in io_engine (R8) on top of
+ *     translation/submit step lives in io_engine on top of
  *     gpu_file_resolve.h + nvme_storage_device.cuh.
  *
  * Lifetime:
@@ -134,13 +134,13 @@ struct GpuFileSpec {
     /// Note: tensor_size is the LOGICAL stripe / interleave unit at
     /// the GpuFile layer; it is NOT the NVMe-level IO size.  When
     /// tensor_size exceeds the device's MDTS (Max Data Transfer
-    /// Size, typ. 128 KiB), `memory/` (R7) will fragment each
+    /// Size, typ. 128 KiB), `memory/` will fragment each
     /// tensor at register_tensor() time into ceil(tensor_size /
-    /// MDTS) PRPMappingEntry sub-slices, and `io_engine/` (R8)
+    /// MDTS) PRPMappingEntry sub-slices, and `io_engine/`
     /// will issue that many GPUIoContext entries per tensor at
     /// submit time.  This layer does not need to know about that
     /// fan-out: gpu_file_resolve() returns the shard's BASE byte
-    /// offset for the tensor, and R8 adds each sub-slice's
+    /// offset for the tensor, and io_engine adds each sub-slice's
     /// intra-tensor offset on top.
     uint32_t tensor_shape[3];
 
@@ -178,8 +178,7 @@ struct GpuFile {
 /// underlying NvmeFile).
 ///
 /// The struct itself lives in *host* memory.  io_engine consumes
-/// it during host-side per-IO context staging (see
-/// LegacyDecomposition.md §R8): for each IO, host code does
+/// it during host-side per-IO context staging: for each IO, host code does
 ///   gpu_file_resolve(handle->tensor_size, handle->num_shards,
 ///                    byte_off, &si, &so);
 ///   ctx.d_shard         = handle->d_shards_host[si];
@@ -201,7 +200,7 @@ struct GpuFileHandle {
     /// `file->tensor_shape[2]` and `file->tensor_shape[0]`).
     ///
     /// tensor_size here is the logical stripe unit, NOT MDTS.
-    /// io_engine (R8) computes per-IO sub-slice sizes from R7's
+    /// io_engine computes per-IO sub-slice sizes from memory/'s
     /// PRPMappingEntry tables, not from this field; this field's
     /// only role on the hot path is the `gpu_file_resolve`
     /// computation that picks a shard.
@@ -217,8 +216,8 @@ struct GpuFileHandle {
     /// nvme_storage); do NOT dereference on host.  The vector that
     /// holds them is host-resident.
     ///
-    /// Hot-path usage (mirrors the legacy gpu_controller.cu design):
-    /// io_engine (R8) host-stages a per-IO context array; for each
+    /// Hot-path usage:
+    /// io_engine host-stages a per-IO context array; for each
     /// IO it resolves shard_idx via gpu_file_resolve() and copies
     /// d_shards_host[shard_idx] *into the context* before
     /// cudaMemcpy'ing the array to GPU.  The kernel therefore only
@@ -344,7 +343,8 @@ public:
 
     /// Batch create: creates `count` GpuFiles concurrently (multi-
     /// threaded; FS operations run without the global mutex so they
-    /// genuinely parallelize at the NVMe level via R11.5's split-lock).
+    /// genuinely parallelize at the NVMe level via nvme_storage's
+    /// split-lock design).
     /// `flags` is typically GPU_FILE_OPEN_CREATE | GPU_FILE_OPEN_NO_PERSIST.
     /// out[i] corresponds to specs[i]; nullptr on per-file failure.
     /// Caller MUST call flush_metadata() once after the batch.
@@ -399,41 +399,7 @@ public:
     virtual std::vector<GpuFile*> list_open_gpu_files() const = 0;
 
     // ------------------------------------------------------------------
-    // GPU acquire (R6)
-    //
-    // These DO NOT open or create the GpuFile -- the file must
-    // already be in the directory.  They produce a host-side
-    // "acquired" handle that bundles per-shard NvmeFileDeviceHandle*
-    // and a small GPU-resident pointer table (d_shards_dev).
-    //
-    // Naming intentionally avoids "open" so this isn't confused
-    // with the directory-level open_gpu_file.
-    //
-    // Semantics:
-    //   acquire_device_handle   for each shard NvmeFile, calls the
-    //                           underlying INvmeStorage's
-    //                           acquire_device_handle; cudaMallocs
-    //                           a pointer table of size num_shards
-    //                           on the file's GPU and copies the
-    //                           per-shard handle pointers into it.
-    //
-    //                           Returns nullptr if any underlying
-    //                           acquire fails (with rollback of the
-    //                           ones already done).
-    //
-    //   release_device_handle   calls
-    //                           INvmeStorage::release_device_handle
-    //                           on every shard handle, cudaFrees
-    //                           d_shards_dev, deletes the
-    //                           GpuFileHandle.  No-op on nullptr.
-    //                           Idempotent.
-    //
-    // Lifetime: the returned handle is valid as long as every
-    // shard's NvmeFile is alive AND its device's queue_group is
-    // alive.  In practice: don't outlive close_gpu_file or
-    // INvmeStorage::shutdown.
-    // ------------------------------------------------------------------
-    // GPU acquire (R6; async pooled R11)
+    // GPU acquire (async, pooled)
     //
     // These DO NOT open or create the GpuFile -- the file must
     // already be in the directory.  They produce a host-side
@@ -467,7 +433,7 @@ public:
     //                        `l1_capacity` GpuFiles can always have
     //                        every shard resident simultaneously.
     //
-    // Semantics (R11.3):
+    // Semantics:
     //   acquire_device_handle   idempotent "ensure resident": for
     //                           each shard NvmeFile, calls the
     //                           underlying INvmeStorage's

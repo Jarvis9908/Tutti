@@ -1,5 +1,5 @@
 /**
- * tutti_daemon.cpp -- Tutti NVMe service daemon entry (R9.6).
+ * tutti_daemon.cpp -- Tutti NVMe service daemon entry.
  *
  * The owner half of the SERVICE_CLIENT data plane.  This process is
  * the sole owner of every NVMe controller named in sys_config.yaml:

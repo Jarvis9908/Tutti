@@ -1,18 +1,17 @@
 /**
- * io_engine_smoke.cu -- R8.2 multi-round end-to-end byte-verified smoke.
+ * io_engine_smoke.cu -- multi-round end-to-end byte-verified smoke.
  *
- * Spec smoke for R8 (doc/refactor/R8_io_engine_plan.md §4): batch IO
- * through the GPU kernel against a 2-stripe GpuFile, byte-compared
- * against ground truth in BOTH directions across multiple rounds to
- * exercise stream/queue reuse and the kernel-write -> host-read
- * coherency path.
+ * Batch IO through the GPU kernel against a 2-stripe GpuFile,
+ * byte-compared against ground truth in BOTH directions across
+ * multiple rounds to exercise stream/queue reuse and the
+ * kernel-write -> host-read coherency path.
  *
  * Layout:
  *   GpuFile      : num_shards=2, layers=4, tensor_size=128 KiB
  *                  (per-shard size = 4 * 128 KiB = 512 KiB,
  *                   total file size = 1 MiB).
  *   GPU tensor   : 1 MiB device region, granularity=128 KiB.
- *                  R7 splits it into 8 sub-slices, each one IO of
+ *                  memory/ splits it into 8 sub-slices, each one IO of
  *                  128 KiB (32 host pages -> PRP-list path active).
  *   Submit shape : 8 NvmeBatchEntries.
  *                  fd_idx   = prp_idx % 2     -> shards 0,1,0,1,0,1,0,1
@@ -42,10 +41,10 @@
  *
  * Cache coherency note for the kernel-write -> host-pread path:
  * the kernel's NVMe DMA writes bypass the host's ext4 page cache.
- * R11.5: read_blocking uses O_DIRECT, which also bypasses the page
+ * read_blocking uses O_DIRECT, which also bypasses the page
  * cache, so host pread always fetches fresh data from disk -- no
  * posix_fadvise cache-drop is needed.  This is a smoke-side concern
- * only -- production hot path is GPU NVMe DMA (R5b).
+ * only -- production hot path is GPU NVMe DMA.
  *
  * Test contract:
  *   - sole owner of every NVMe (NVMeService daemon MUST NOT be running)
@@ -64,14 +63,14 @@
 #include "io_engine.h"
 #include "local_nvme/local_nvme_io_engine.h"
 
-// memory (R7)
+// memory
 #include "host_device_memory_subsystem.h"
 
-// block_storage (R6 + R8.1 d_shards_dev extension)
+// block_storage
 #include "host_fs_backed_block_storage.h"
 #include "block_storage.h"
 
-// nvme_storage (R5)
+// nvme_storage
 #include "host_fs_backed_nvme_storage.h"
 #include "nvme_storage.h"
 
@@ -465,7 +464,7 @@ int main(int argc, char** argv) {
             STEP_FAIL("register_tensor(granularity=%zu)", kGranularity);
     }
 
-    // R8.3: IIoEngine owns its own NvmeBatchEntry scratch (host +
+    // IIoEngine owns its own NvmeBatchEntry scratch (host +
     // device).  Sized to comfortably exceed kNumSubSlices so the
     // per-round flatten always fits.
     auto engine = std::make_unique<tutti::LocalNvmeIoEngine>(

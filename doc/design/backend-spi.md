@@ -31,9 +31,12 @@ and through the SPI for IO.
    registers; the backend consumes `MemoryRegion*` handles.
 
 4. **Nouns vs Services.** Runtime nouns (`Device`, `Lease`,
-   `IOBuffer`, `BatchRequest`, `StorageTarget`) live in `runtime/`.
-   Services that produce them (`IDeviceRegistry`, `ILeaseManager`) live
-   in `device_manager/`. The SPI sits between them.
+   `IOBuffer`, `BatchRequest`, `StorageTarget`) live in `coordinator/`
+   (the `runtime/` directory referenced in earlier drafts of this
+   document has since been deleted — see
+   [restructuring-plan.md](../refactor/restructuring-plan.md), Decisions
+   Summary). Services that produce them (`IDeviceRegistry`,
+   `ILeaseManager`) live in `device_manager/`. The SPI sits between them.
 
 ## 2. Type Inventory
 

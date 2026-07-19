@@ -1,7 +1,7 @@
-# examples/ -- Tutti end-to-end examples / smokes (R9).
+# examples/ -- Tutti end-to-end examples / smokes.
 #
-# R9.4 collapsed every per-layer smoke (previously living under each
-# subsystem's test/ directory) into this single flat tree.  Each
+# Every per-layer smoke (previously living under each
+# subsystem's test/ directory) is collapsed into this single flat tree.  Each
 # subsystem CMakeLists now only builds its library + installs headers;
 # all executables are declared here.
 #
@@ -35,7 +35,7 @@ tutti_add_cuda_smoke(registry_smoke device_manager/registry_smoke.cu
 tutti_add_cuda_smoke(memory_smoke memory/memory_smoke.cu
     tutti_memory tutti_device_manager libnvm CUDA::cudart)
 
-# R11.1: two-tier (CPU pinned L2 + GPU L1) handle cache correctness
+# Two-tier (CPU pinned L2 + GPU L1) handle cache correctness
 # smoke.  Pure memory-subsystem test (no NVMe hardware needed) --
 # only depends on tutti_memory (header-only gpu_slot_pool /
 # host_slot_pool / tiered_handle_cache templates) + CUDA runtime.
@@ -53,7 +53,7 @@ tutti_add_cuda_smoke(nvme_storage_e2e_stress nvme_storage/nvme_storage_e2e_stres
     tutti_nvme_storage tutti_device_manager libnvm CUDA::cudart)
 
 # ---- block_storage --------------------------------------------------------
-# R6.1 unit test is plain host C++ (no CUDA); declare it directly.
+# The gpu_file_resolve unit test is plain host C++ (no CUDA); declare it directly.
 add_executable(block_storage_resolve_test block_storage/gpu_file_resolve_test.cpp)
 target_link_libraries(block_storage_resolve_test PRIVATE tutti_block_storage)
 set_target_properties(block_storage_resolve_test PROPERTIES
@@ -80,7 +80,7 @@ tutti_add_cuda_smoke(io_engine_smoke io_engine/io_engine_smoke.cu
     tutti_io_engine_local_nvme tutti_block_storage tutti_nvme_storage
     tutti_memory tutti_device_manager libnvm CUDA::cudart)
 
-# ---- coordinator (R9.5 end-to-end) ----------------------------------------
+# ---- coordinator (end-to-end) ----------------------------------------------
 # Coordinator-driven byte-verified roundtrip across the whole stack.
 tutti_add_cuda_smoke(e2e_smoke coordinator/e2e_smoke.cu
     tutti_coordinator tutti_block_storage tutti_nvme_storage
@@ -92,7 +92,7 @@ tutti_add_cuda_smoke(metadata_cache_stress coordinator/metadata_cache_stress.cu
     tutti_memory tutti_device_manager libnvm CUDA::cudart)
 
 # ---- adapters/kv_cache (KV-cache semantics on top of io_engine) -----------
-# Exercises KvCacheIoAdapter (legacy per-layer K/V offset + auto-chunking)
+# Exercises KvCacheIoAdapter (per-layer K/V offset + auto-chunking)
 # end-to-end through the Coordinator.  Same binary covers both bring-up
 # modes: default IN_PROCESS, or --service <endpoint> for SERVICE_CLIENT.
 tutti_add_cuda_smoke(kv_cache_adapter_smoke adapters/kv_cache_adapter_smoke.cu
@@ -113,7 +113,7 @@ tutti_add_cuda_smoke(kv_cache_e2e_stress adapters/kv_cache_e2e_stress.cu
 tutti_add_cuda_smoke(phoenix_conflict_diag phoenix_conflict_diag.cu
     libnvm CUDA::cudart)
 
-# ---- tutti_daemon (R9.6 SERVICE_CLIENT owner half) ------------------------
+# ---- tutti_daemon (SERVICE_CLIENT owner half) -----------------------------
 # The owner-side daemon: brings up the NVMe controllers via libnvm B3
 # and serves gRPC so SERVICE_CLIENT Coordinators can attach.  Thin
 # wrapper over nvmeservice::ServiceState; links the gRPC/protobuf stack

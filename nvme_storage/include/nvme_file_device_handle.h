@@ -4,7 +4,7 @@
 /**
  * nvme_file_device_handle.h -- on-GPU file handle.
  *
- * Layer: nvme_storage (R5b).
+ * Layer: nvme_storage.
  *
  * Lives entirely in GPU memory.  Produced by
  * `INvmeStorage::acquire_device_handle(NvmeFile*)` (which cudaMallocs one
@@ -16,9 +16,9 @@
  * Extent storage -- inline-small + overflow (sizing note):
  *
  *   The per-file extent count is capped at `kNvmeFileHeaderMaxExtents`
- *   (124) at create time (fiemap_helper).  R11.5 removed the on-disk
- *   `NvmeFileHeader`; the cap is retained to bound log-entry size and
- *   kept under its historical name.  The GPU-resident handle is the
+ *   (124) at create time (fiemap_helper).  There is no on-disk
+ *   `NvmeFileHeader`; the cap only bounds log-entry size, and is kept
+ *   under this name for source stability.  The GPU-resident handle is the
  *   opposite: every inline extent is real GPU memory that gets paid
  *   *every acquire*, and Tutti expects to hold potentially millions
  *   of these concurrently (LMCache-shaped KV-cache workloads).  So
@@ -39,11 +39,8 @@
  *   This mirrors NVMe's own PRP1/PRP2 + PRP-list pattern (small
  *   inline, list only when needed) and is the fix for the "2M KV
  *   files at once" GPU-memory sizing problem: with 8 inline extents
- *   sizeof(NvmeFileDeviceHandle) is ~190-200 bytes (vs. the naive
- *   124-inline-extent design's ~2 KiB) -- an order of magnitude
- *   smaller, and comparable to or smaller than the legacy GeminiFS
- *   on-disk `geminiFS_hdr` (512 B cap, ~30 extents) that this
- *   supersedes.
+ *   sizeof(NvmeFileDeviceHandle) is ~190-200 bytes, an order of
+ *   magnitude smaller than a naive 124-inline-extent design's ~2 KiB.
  *
  *   Raising `kNvmeFileDeviceHandleInlineExtents` is a safe, purely
  *   size/cost tradeoff -- it does not change which files can be
@@ -98,7 +95,7 @@ struct NvmeFileDeviceHandle {
     /// Useful for debugging; kernels usually don't read this.
     uint64_t   file_id;
 
-    /// Logical (user-visible) size in bytes.  R11.5: no in-band
+    /// Logical (user-visible) size in bytes.  There is no in-band
     /// header, so this equals the on-disk file size.  IO requests
     /// with logical_off + nbytes > logical_size_bytes MUST be
     /// rejected by the caller; submit_*_one assumes the args are
@@ -107,7 +104,7 @@ struct NvmeFileDeviceHandle {
 
     /// Bytes to add to the user-supplied `logical_off` before
     /// walking extents, so users see a clean "offset 0 == first
-    /// byte of payload".  R11.5: always 0 (no in-band header);
+    /// byte of payload".  Always 0 (no in-band header);
     /// the field is kept for kernel-source stability and
     /// resolve_lba still adds it (a no-op add of 0).
     uint32_t   header_bytes;

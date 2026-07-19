@@ -55,9 +55,9 @@ struct IORequestBatch;       // io_request.h
 struct CoopIOChannel;        // coop_channel.h
 enum class CoopDirection : uint32_t;  // coop_channel.h
 struct MemoryRegion;         // memory/include/memory_region.h
-struct SubSliceInfo;         // currently in filesystems/.../geminifs_mem.h;
-                             // a runtime-canonical home will be defined when
-                             // the runtime/ object model is finalised (Slice 3).
+struct SubSliceInfo;         // sub-slice layout descriptor; forward-declared
+                             // here because its owning header does not exist
+                             // in this codebase yet.
 class IQueue;                // queue.h
 class IQueueProvider;        // queue_provider.h
 class IOFuture;              // io_future.h
@@ -233,10 +233,20 @@ public:
     // 4.5 Metadata
     // ------------------------------------------------------------------
 
+    /// Discriminator matching this backend's entries in BufferDescriptor
+    /// / Device::backend_type.
     virtual BackendType  backend_type() const = 0;
+
+    /// Human-readable name for logs/diagnostics (e.g. "local_nvme").
     virtual const char*  backend_name() const = 0;
+
+    /// Maximum single-IO transfer size this backend supports, in bytes.
     virtual std::size_t  max_io_size()  const = 0;   // bytes
+
+    /// Depth (entry count) of each queue this backend creates.
     virtual std::size_t  queue_depth()  const = 0;
+
+    /// Number of queues available for acquisition.
     virtual std::size_t  queue_count()  const = 0;
 };
 

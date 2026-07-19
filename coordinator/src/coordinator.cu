@@ -1,5 +1,5 @@
 /**
- * coordinator.cpp -- Coordinator orchestration impl (R9.2 / R9.3).
+ * coordinator.cpp -- Coordinator orchestration impl.
  *
  * Brings up registry -> nvme_storage -> block_storage -> memory ->
  * io_engine in dependency order and exposes thin passthroughs to the
@@ -191,7 +191,7 @@ bool Coordinator::bootstrap(const CoordinatorConfig& cfg) {
         return false;
     }
 
-    // R11.3: size the two-tier handle caches (block_storage's own
+    // Size the two-tier handle caches (block_storage's own
     // ShardPtrSlot pool + nvme_storage's per-shard two-tier
     // NvmeFileDeviceHandle cache, forwarded internally -- see
     // block_storage.h's configure_handle_pool doc) BEFORE any
@@ -204,14 +204,14 @@ bool Coordinator::bootstrap(const CoordinatorConfig& cfg) {
         return false;
     }
 
-    // ---- 4. memory (R7) --------------------------------------------
+    // ---- 4. memory --------------------------------------------------
     mem_ = std::make_unique<HostDeviceMemorySubsystem>();
     mem_->set_descriptor_format(cfg.descriptor_format);
     mem_->configure_prp_pool(cfg.prp_l1_gpu_budget_bytes,
                               cfg.prp_l2_host_budget_bytes);
     mem_->bind_devices(devices_);
 
-    // ---- 5. io_engine (R8.3) ---------------------------------------
+    // ---- 5. io_engine -------------------------------------------------
     engine_ = std::make_unique<LocalNvmeIoEngine>(
         mem_.get(), cfg.max_entries_per_batch);
 
@@ -359,7 +359,7 @@ uint32_t Coordinator::batch_entry_count(MemoryRegion* region) const {
 }
 
 // ---------------------------------------------------------------------------
-// Transparent handle cache (id-keyed; R11.3)
+// Transparent handle cache (id-keyed)
 // ---------------------------------------------------------------------------
 
 GpuFileHandle* Coordinator::handle_for(GpuFileId id, cudaStream_t stream) {

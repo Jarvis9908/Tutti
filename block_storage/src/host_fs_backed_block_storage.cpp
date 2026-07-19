@@ -266,7 +266,7 @@ bool HostFsBackedBlockStorage::shutdown() {
 }
 
 // ---------------------------------------------------------------------------
-// Reconcile (R6.2 analogue of nvme_storage R5a.0)
+// Reconcile (analogous to nvme_storage's bootstrap-time reconcile)
 // ---------------------------------------------------------------------------
 //
 // For the leader log, walk every entry and its shards:
@@ -376,7 +376,7 @@ void HostFsBackedBlockStorage::mark_all_dirty_locked_() {
 // Directory ops
 // ---------------------------------------------------------------------------
 
-// CREATE branch of open_gpu_file() -- R11.5 split-lock: FS operations
+// CREATE branch of open_gpu_file() -- FS operations
 // (open_file per shard) run WITHOUT mtx_ so bulk-create parallelizes
 // across threads; the bookkeeping section (file_id, log, GpuFile) re-
 // acquires mtx_ internally.  Caller must NOT hold mtx_.
@@ -397,7 +397,7 @@ GpuFile* HostFsBackedBlockStorage::create_gpu_file_impl_(
     if (!persist_now) nvme_flags |= NVME_OPEN_NO_PERSIST | NVME_OPEN_NO_SYNC;
 
     // ---- FS operations (NO mtx_ held) ----
-    // R11.5: nvme_storage's open_file releases its own mtx_ during FS
+    // nvme_storage's open_file releases its own mtx_ during FS
     // ops, so multiple threads calling create_gpu_file_impl_ in parallel
     // genuinely parallelize at the kernel level.
     std::vector<NvmeFile*> shards(num_shards, nullptr);
@@ -527,7 +527,7 @@ GpuFile* HostFsBackedBlockStorage::open_gpu_file(const GpuFileSpec& spec,
     if (e == nullptr) {
         // Doesn't exist in the directory.
         if (!(flags & GPU_FILE_OPEN_CREATE)) return nullptr;   // EXISTING: not found
-        // R11.5: release the lock during create so FS operations
+        // Release the lock during create so FS operations
         // (open_file per shard) run without mtx_ — bulk-create can
         // parallelize across threads.  create_gpu_file_impl_ re-
         // acquires mtx_ internally for the bookkeeping section.
@@ -592,8 +592,8 @@ std::vector<GpuFile*> HostFsBackedBlockStorage::open_gpu_files_batch(
     if (!persist_now) nvme_flags |= NVME_OPEN_NO_PERSIST | NVME_OPEN_NO_SYNC;
 
     // 1. Validate every spec + flatten all shards into ONE nvme batch
-    //    create list.  The threading now lives in nvme_storage's
-    //    open_files_batch (R11.5) -- block_storage no longer spawns
+    //    create list.  The threading lives in nvme_storage's
+    //    open_files_batch -- block_storage does not spawn
     //    its own threads; it just flattens, batch-creates, and does
     //    the serial bookkeeping.
     std::vector<INvmeStorage::CreateSpec> shard_specs;
@@ -762,7 +762,7 @@ bool HostFsBackedBlockStorage::delete_gpu_file(GpuFile* file,
 
     const uint32_t fid = file->id;
 
-    // R11.3: drop this GpuFile's ShardPtrSlot residency (if any)
+    // Drop this GpuFile's ShardPtrSlot residency (if any)
     // BEFORE its shards are deleted below -- otherwise it would sit
     // on a GPU slot holding pointers to shards that no longer exist
     // until the LRU eventually (but not necessarily promptly) evicts
@@ -918,30 +918,13 @@ HostFsBackedBlockStorage::list_open_gpu_files() const {
 }
 
 // ---------------------------------------------------------------------------
-// GPU acquire/release (R6.3)
+// GPU acquire/release: pool configuration
 // ---------------------------------------------------------------------------
 //
-// Per-shard fan-out over the underlying INvmeStorage's R5b API.
-// Each NvmeFile shard's NvmeFileDeviceHandle is cudaMalloc'd on the
-// GPU of that shard's Device by nvme_storage; we just collect the
-// pointers into a host vector inside the GpuFileHandle.
-//
-// io_engine (R8) reads d_shards_host[shard_idx] on the host when
-// staging per-IO GPUIoContext arrays, copying the resolved
-// NvmeFileDeviceHandle* directly into each ctx before cudaMemcpy.
-// The kernel never indirects through a GPU-resident shard table:
-// one less GPU load per IO and no shard-table lifetime to manage.
-//
-// Failure semantics:
-//   - If any per-shard acquire fails, all previously acquired shard
-//     handles are released and the function returns nullptr.
-//   - The returned GpuFileHandle is heap-allocated; release_device_handle
-//     is the matching deleter (it also releases each shard handle and
-//     does NOT touch file->shards or files_).
-//   - Idempotent against concurrent close_gpu_file: once a caller
-//     has a GpuFile* and calls acquire on it, the underlying
-//     NvmeFile shard pointers stay valid for the lifetime of the
-//     returned GpuFileHandle (caller must release before close).
+// Sizes this layer's own ShardPtrSlot pool (l1_capacity GpuFiles) and
+// forwards to the underlying INvmeStorage's per-shard handle-cache
+// configuration.  MUST be called once, right after bootstrap(), before
+// the first acquire_device_handle.
 bool HostFsBackedBlockStorage::configure_handle_pool(uint32_t l1_capacity, uint32_t l2_capacity) {
     {
         std::lock_guard<std::mutex> lock(shard_pools_mtx_);
@@ -960,7 +943,7 @@ bool HostFsBackedBlockStorage::configure_handle_pool(uint32_t l1_capacity, uint3
         handle_pool_capacity_ = l1_capacity;
     }
     // Forward to the underlying INvmeStorage -- its
-    // NvmeFileDeviceHandle cache is two-tier (R11.3) but counts
+    // NvmeFileDeviceHandle cache is two-tier but counts
     // individual SHARD NvmeFiles, not GpuFiles; this layer's own
     // ShardPtrSlot pool (single-tier, l1_capacity only -- see the
     // ShardPool doc comment in the header for why a second tier
@@ -1118,17 +1101,17 @@ void HostFsBackedBlockStorage::release_shard_slot_(GpuFileId id, cudaStream_t st
 }
 
 // ---------------------------------------------------------------------------
-// GPU acquire/release (R6.3; two-tier async pooled R11.3)
+// GPU acquire/release (two-tier, async, pooled)
 // ---------------------------------------------------------------------------
 //
-// Per-shard fan-out over the underlying INvmeStorage's R5b/R11.3 API
+// Per-shard fan-out over the underlying INvmeStorage's handle-cache API
 // (ensure-resident, near-free on a hit).  This layer's own
 // ShardPtrSlot is single-tier (see the ShardPool doc comment in the
 // header) and ALWAYS rewritten on every acquire -- cheap (~32 B copy)
 // and avoids caching a shard pointer that may have moved underneath
 // nvme_storage's own cache.
 //
-// io_engine (R8) reads d_shards_host[shard_idx] on the host when
+// io_engine reads d_shards_host[shard_idx] on the host when
 // staging per-IO GPUIoContext arrays, copying the resolved
 // NvmeFileDeviceHandle* directly into each ctx before cudaMemcpy.
 // The kernel never indirects through a GPU-resident shard table:
@@ -1203,7 +1186,7 @@ HostFsBackedBlockStorage::acquire_device_handle(GpuFile* file, GpuStreamHandle s
         handle->d_shards_host.push_back(dh);
     }
 
-    // R8/R11.3: resolve/refresh this GpuFile's own ShardPtrSlot.
+    // Resolve/refresh this GpuFile's own ShardPtrSlot.
     ShardPtrSlot slot_value{};   // zero-inits every ptrs[i], including the
                                  // kGpuFileMaxShards - num_shards trailing
                                  // slots the kernel never reads.
@@ -1239,7 +1222,7 @@ void HostFsBackedBlockStorage::release_device_handle(GpuFileHandle* h, GpuStream
 
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_h);
 
-    // R11.3: advisory -- lets this GpuFile's ShardPtrSlot (and every
+    // Advisory -- lets this GpuFile's ShardPtrSlot (and every
     // shard's NvmeFileDeviceHandle) be evicted sooner.  Nothing is
     // freed synchronously.
     if (h->file != nullptr) release_shard_slot_(h->file->id, stream);
@@ -1251,7 +1234,7 @@ void HostFsBackedBlockStorage::release_device_handle(GpuFileHandle* h, GpuStream
 }
 
 // ---------------------------------------------------------------------------
-// GPU acquire (batch; R11.3)
+// GPU acquire (batch)
 // ---------------------------------------------------------------------------
 //
 // Flattens every requested file's shards into ONE list and issues a

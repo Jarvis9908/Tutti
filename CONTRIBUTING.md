@@ -6,7 +6,6 @@ Use this file together with:
 
 - [`README.md`](README.md)
 - [`Roadmap.md`](Roadmap.md)
-- [`Todolist.md`](Todolist.md)
 
 ## First Principles
 
@@ -27,9 +26,8 @@ Do not optimize for short-term convenience at the cost of locking future `Local 
 Before making meaningful changes, read:
 
 1. [`Roadmap.md`](Roadmap.md)
-2. [`Todolist.md`](Todolist.md)
-3. [`README.md`](README.md)
-4. Relevant subsystem documents for the area you are changing
+2. [`README.md`](README.md)
+3. Relevant subsystem documents for the area you are changing
 
 If you are changing architecture, interfaces, deployment flow, or naming, you must read the relevant current documents first and align with them.
 

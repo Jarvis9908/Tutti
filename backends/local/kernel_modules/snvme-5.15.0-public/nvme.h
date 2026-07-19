@@ -49,21 +49,6 @@ extern struct workqueue_struct *s_nvme_delete_wq;
 
 
 
-struct nvme_gpu_map{
-	u32    nvme_bdf_id;
-	u32    gpu_num;
-	struct GPU_io_queue_info *gpu;
-};
-
-
-struct GPU_io_queue_info {
-	u64 sq_dma_ptr[64];
-	u64 cq_dma_ptr[64];
-	u64 db_dma_ptr[64];
-	u32    io_queue_num;
-	u32    gpu_bdf_id;
-};
-
 /*
  * List of workarounds for devices that required behavior not specified in
  * the standard.

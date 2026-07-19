@@ -10,10 +10,6 @@
  * Device, generation-arbitrated at bootstrap).
  *
  * v0.1 limitations:
- *   - GPU acquire/release (R6.3) is implemented as a stub that
- *     returns nullptr.  R6.2 only ships host-side directory + IO
- *     plumbing.  Smokes that need GPU submit go via
- *     nvme_storage_gpu_smoke for now.
  *   - shard placement is strictly 1:1 (no two shards on the same
  *     device per file).
  */
@@ -153,11 +149,11 @@ private:
     // Live GpuFile* keyed by file_id.  We own the unique_ptrs.
     std::map<uint32_t, std::unique_ptr<GpuFile>>    files_;
 
-    // ---- GPU-resident shard-pointer-table pool (R11.3: single-tier
+    // ---- GPU-resident shard-pointer-table pool (single-tier
     // -- see block_storage.h's GpuFileHandle::d_shards_dev doc and
     // memory/include/gpu_slot_pool.h) ----
     //
-    // Unlike nvme_storage's NvmeFileDeviceHandle (R11.3: two-tier --
+    // Unlike nvme_storage's NvmeFileDeviceHandle (two-tier --
     // see tiered_handle_cache.h), ShardPtrSlot does NOT get an L2
     // tier here: its content (each shard's NvmeFileDeviceHandle*) is
     // only valid as of the moment it was last written -- the

@@ -169,7 +169,7 @@ struct TensorRegistrationSpec {
 };
 
 // ---------------------------------------------------------------------------
-// One pre-computed IO slice exported to upper layers (R7).
+// One pre-computed IO slice exported to upper layers.
 //
 // register_tensor() splits a tensor into N slices of `granularity`
 // bytes each (or one slice covering the whole tensor when
@@ -322,8 +322,8 @@ public:
     // nvme_storage host-side IO).
     // ------------------------------------------------------------------
 
-    /// Look up the pre-computed IoSliceView for a registered tensor
-    /// (R7).  `slice_addr` MUST equal
+    /// Look up the pre-computed IoSliceView for a registered tensor.
+    /// `slice_addr` MUST equal
     ///   tensor.ptr + j * granularity      for some j in [0, num_slices)
     /// when register_tensor was called with granularity > 0.  When
     /// granularity == 0 there is exactly one slice covering the
@@ -346,8 +346,8 @@ public:
                         uint64_t       slice_addr) const = 0;
 
     /// Bulk export every (slice_addr -> IoSliceView) for a region
-    /// in slice_addr order (R7).  Empty vector if the region has no
-    /// IO-slice table.  Used by R8 io_engine for batched host-side
+    /// in slice_addr order.  Empty vector if the region has no
+    /// IO-slice table.  Used by io_engine for batched host-side
     /// IO context staging where the caller wants to walk every
     /// slice once.
     virtual std::vector<IoSliceView>

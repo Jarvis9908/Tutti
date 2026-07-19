@@ -1,6 +1,6 @@
 /**
  * nvme_storage_e2e_stress.cu -- comprehensive end-to-end stress test for
- * HostFsBackedNvmeStorage (R11.5).
+ * HostFsBackedNvmeStorage.
  *
  * Phases:
  *   1. Bulk create N files (default 100K, --n 1000000 for 1M) — timing.

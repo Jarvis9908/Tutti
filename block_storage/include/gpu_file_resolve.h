@@ -4,7 +4,7 @@
 /**
  * gpu_file_resolve.h -- pure address-translation helper.
  *
- * Layer: block_storage (R6).
+ * Layer: block_storage.
  *
  * A "GpuFile" is a logical container whose data plane is split across
  * `num_shards` independent NvmeFiles (one per shard, typically one

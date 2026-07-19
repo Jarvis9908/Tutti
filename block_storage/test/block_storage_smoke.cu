@@ -1,5 +1,5 @@
 /**
- * block_storage_smoke.cu -- R6.2 host-side end-to-end smoke for
+ * block_storage_smoke.cu -- host-side end-to-end smoke for
  * HostFsBackedBlockStorage.
  *
  * Steps:
@@ -41,7 +41,7 @@
 #include "nvme_storage.h"
 
 #include "../../device_manager/include/local_nvme_direct_registry.h"
-#include "../../runtime/include/device.h"
+#include "../../coordinator/include/device.h"
 
 #include <cuda_runtime.h>
 
@@ -214,7 +214,7 @@ int run(int cuda_dev, const std::vector<std::string>& pci_addrs, uint32_t cap)
         tutti::LocalNvmeDirectConfig c{};
         c.pci_addr          = bdf;
         c.kernel_ioq_cap    = cap;
-        c.build_queue_group = false;     // R6.2 host-only
+        c.build_queue_group = false;     // host-only
         cfgs.push_back(std::move(c));
     }
     tutti::LocalNvmeDirectRegistry registry(std::move(cfgs));

@@ -394,9 +394,9 @@ Move FIEMAP logic from `nvme_storage/` into `filesystems/ext4_fiemap/`:
 - `LocalNvmeIoEngine` becomes `LocalNvmeBackend` implementing
   `IBackendProvider`; the generic engine just dispatches
 
-## 8. Distributed Filesystem Support (DOCA GPUNetIO)
+## 7. Distributed Filesystem Support (DOCA GPUNetIO)
 
-### 8.1 The Split Data/Metadata Path Pattern
+### 7.1 The Split Data/Metadata Path Pattern
 
 For distributed filesystems (3FS, JuiceFS, DAOS, CephFS, etc.), the
 metadata and data paths are naturally split:
@@ -448,7 +448,7 @@ metadata and data paths are naturally split:
   using DOCA GPUNetIO or raw RDMA verbs. The GPU kernel constructs work
   requests and submits them via NIC queues mapped to GPU memory.
 
-### 8.2 How This Fits the SPI
+### 7.2 How This Fits the SPI
 
 The two-axis design (filesystems × backends) maps directly to this
 pattern:
@@ -467,7 +467,7 @@ kernel that uses this target to perform the actual data transfer.
 backend layer never touches the metadata path. They meet only through
 `StorageTarget`.
 
-### 8.3 DOCA GPUNetIO as a Backend Implementation
+### 7.3 DOCA GPUNetIO as a Backend Implementation
 
 DOCA GPUNetIO is NVIDIA's high-level API for GPU-direct networking. It
 provides:
@@ -524,7 +524,7 @@ __global__ void doca_rdma_xfer_kernel(
 }
 ```
 
-### 8.4 DOCA GPUNetIO vs. Raw ibverbs
+### 7.4 DOCA GPUNetIO vs. Raw ibverbs
 
 | Aspect | Raw ibverbs | DOCA GPUNetIO |
 |--------|-------------|---------------|
@@ -543,7 +543,7 @@ Both approaches implement the same `IBackendProvider` SPI — they are
 - Both use the same `StorageTarget { RDMA_REMOTE }` from the filesystem
   layer
 
-### 8.5 Distributed FS Client Implementations
+### 7.5 Distributed FS Client Implementations
 
 Each distributed filesystem needs its own `IFilesystem` implementation
 under `filesystems/dfs_client/`:
@@ -560,7 +560,7 @@ resolve metadata, then hands the `StorageTarget` to the runtime. The
 GPU backend performs the actual data transfer using the target's
 remote address and memory key.
 
-### 8.6 Practical Example: 3FS + DOCA GPUNetIO
+### 7.6 Practical Example: 3FS + DOCA GPUNetIO
 
 ```
 Application: "read layer 5 of block 42 from 3FS"

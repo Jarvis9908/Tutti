@@ -119,7 +119,7 @@ bool KvCacheIoAdapter::xfer(int                                 layer_idx,
         return false;
     }
 
-    // Legacy geminifs_batched_xfer offsets:
+    // Per-layer K/V byte offsets:
     //   K @ layer * len * 2 ,  V @ layer * len * 2 + len .
     const uint64_t base  = (uint64_t)layer_idx * tensor_size_ * 2ull;
     const uint64_t k_off = base;
@@ -199,7 +199,7 @@ bool KvCacheIoAdapter::resolve_handles(const std::vector<GpuFileId>&  file_ids,
     }
 
 
-    // R11.3: ONE flattened acquire across every file's shards (see
+    // ONE flattened acquire across every file's shards (see
     // Coordinator::handle_for_batch / block_storage.h's
     // acquire_device_handles_batch doc) instead of `file_ids.size()`
     // separate ones.  Returned pointers' contents are only guaranteed

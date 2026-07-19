@@ -4,8 +4,7 @@
 /**
  * coordinator_config.h -- bring-up configuration for the Coordinator.
  *
- * Layer: Coordinator (top of the layer cake -- see
- * doc/refactor/LegacyDecomposition.md §5 R9).
+ * Layer: Coordinator (top of the layer cake).
  *
  * The Coordinator owns the whole local-NVMe data plane and brings it
  * up in dependency order from a single config:
@@ -13,11 +12,11 @@
  *   <device registry>          (device_manager)
  *     -> HostFsBackedNvmeStorage   (nvme_storage)
  *       -> HostFsBackedBlockStorage  (block_storage)
- *         -> HostDeviceMemorySubsystem (memory, R7)
- *           -> LocalNvmeIoEngine        (io_engine, R8.3)
+ *         -> HostDeviceMemorySubsystem (memory)
+ *           -> LocalNvmeIoEngine        (io_engine)
  *
  * Two bring-up modes select which IDeviceRegistry sits at the top of
- * the chain (R9.6):
+ * the chain:
  *
  *   IN_PROCESS      LocalNvmeDirectRegistry -- this process owns the
  *                   NVMe controllers (chrdev_create + bind + probe via
@@ -103,29 +102,27 @@ struct CoordinatorConfig {
     /// NVMe namespace id for user-queue commands (1 on single-ns drives).
     uint32_t namespace_id = 1;
 
-    /// Cluster-wide descriptor format, frozen at bootstrap (R7).
+    /// Cluster-wide descriptor format, frozen at bootstrap.
     /// PRP today; SGL when every attached controller supports it.
     DescriptorFormat descriptor_format = DescriptorFormat::PRP;
 
-    /// IO-engine NvmeBatchEntry scratch capacity (R8.3).  Caps the
+    /// IO-engine NvmeBatchEntry scratch capacity.  Caps the
     /// flattened (tensor x sub-slice) entry count per submit_batch.
     uint32_t max_entries_per_batch = 256;
 
     /// Upper bound on how many GpuFile device handles may be
-    /// concurrently GPU-resident (R11.3: the L1 tier of nvme_storage's
+    /// concurrently GPU-resident (the L1 tier of nvme_storage's
     /// two-tier NvmeFileDeviceHandle cache; also sizes block_storage's
-    /// own single-tier ShardPtrSlot pool -- see
-    /// doc/tutti_vs_geminifs_rw_and_integration.md's two-tier cache
-    /// design).  A GpuFile's persistent directory entry is cheap
-    /// (millions are fine), but each *GPU-resident* handle costs real
-    /// GPU memory, so only the working set is kept there; the
-    /// least-recently used handle is downgraded to L2 (content
-    /// preserved, NOT deleted) when this cap is exceeded.
+    /// own single-tier ShardPtrSlot pool).  A GpuFile's persistent
+    /// directory entry is cheap (millions are fine), but each
+    /// *GPU-resident* handle costs real GPU memory, so only the
+    /// working set is kept there; the least-recently used handle is
+    /// downgraded to L2 (content preserved, NOT deleted) when this
+    /// cap is exceeded.
     ///
     /// NOT the same knob as `max_entries_per_batch` (that caps IO
-    /// entries per kernel submission, the legacy MAX_IOCTX_PER_BATCH
-    /// analogue) -- this one caps concurrently *GPU-resident files*,
-    /// a completely independent axis.
+    /// entries per kernel submission) -- this one caps concurrently
+    /// *GPU-resident files*, a completely independent axis.
     ///
     /// 0 (default) = AUTO: compute from `handle_l1_gpu_budget_bytes`
     /// at bootstrap time using
@@ -175,7 +172,7 @@ struct CoordinatorConfig {
     uint64_t prp_l2_host_budget_bytes = 1ull * 1024 * 1024 * 1024;
 
     /// Upper bound on how many GpuFile handle TEMPLATES may be
-    /// CPU-pinned-resident at once (R11.3: the L2 tier -- see
+    /// CPU-pinned-resident at once (the L2 tier -- see
     /// tiered_handle_cache.h).  Every file whose handle has been
     /// built at least once lives here until genuinely evicted (rare,
     /// given the large default budget); L1 promotions/downgrades

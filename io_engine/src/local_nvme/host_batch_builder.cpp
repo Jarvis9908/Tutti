@@ -1,5 +1,5 @@
 /**
- * host_batch_builder.cpp -- implementation of build_nvme_batch (R8.1).
+ * host_batch_builder.cpp -- implementation of build_nvme_batch.
  *
  * Pure host code; no CUDA runtime calls (we only store GPU pointers
  * by value, never dereference them).  Keep as .cpp so the compile

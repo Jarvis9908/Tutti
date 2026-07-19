@@ -82,9 +82,7 @@ enum NvmeOpenFlags : uint32_t {
 /// comment above).  Callers that already hold a `cudaStream_t`
 /// (Coordinator, adapters -- anything CUDA-aware) pass it through as
 /// `(GpuStreamHandle)my_stream`; the .cu implementation
-/// `reinterpret_cast`s it back.  Same idea as legacy GeminiFS's
-/// pybind layer threading an `int64_t stream_id` through to
-/// `reinterpret_cast<cudaStream_t>`.
+/// `reinterpret_cast`s it back.
 using GpuStreamHandle = void*;
 
 class INvmeStorage {
@@ -109,13 +107,18 @@ public:
     // Capacity (per device)
     // ------------------------------------------------------------------
 
+    /// Total size in bytes of the host filesystem backing `device`.
+    /// Returns 0 if `device` is not bootstrapped.
     virtual uint64_t total_capacity   (const Device*) const = 0;
+
+    /// Free space in bytes on the host filesystem backing `device`.
+    /// Returns 0 if `device` is not bootstrapped.
     virtual uint64_t available_capacity(const Device*) const = 0;
 
     /// Where this Device's host filesystem is mounted (so callers
     /// can place sidecar metadata under <mount>/.tutti/).  Returns
     /// empty string if `device` is not bootstrapped.  Used by
-    /// block_storage (R6) to colocate gpu_file_log.bin with
+    /// block_storage to colocate gpu_file_log.bin with
     /// nvme_storage's file_log.bin under the same .tutti directory.
     virtual std::string mount_path(const Device*) const = 0;
 
@@ -131,7 +134,7 @@ public:
     ///
     ///   flags & NVME_OPEN_CREATE: if the file doesn't exist, create
     ///            it -- allocates `create_size` bytes on the host
-    ///            filesystem (R11.5: no in-band header prefix; user
+    ///            filesystem (no in-band header prefix; user
     ///            data starts at byte 0), stores the FIEMAP extent
     ///            list in the persistent file log, and creates a
     ///            .refs/ hardlink as an inode refcount -- then open
@@ -147,9 +150,9 @@ public:
     /// Bulk-init knobs (only meaningful with CREATE; default when
     /// unset = "single-file durable"):
     ///   NVME_OPEN_NO_SYNC     skip the fsync a create normally does
-    ///                         (after fallocate).  R11.5 removed the
-    ///                         in-band header pwrite, so there is now
-    ///                         only one fsync.  The file's extents
+    ///                         (after fallocate; there is only one
+    ///                         fsync, since there is no in-band header
+    ///                         pwrite).  The file's extents
     ///                         stay in the page cache but are NOT yet
     ///                         on platter.  Caller MUST follow up with
     ///                         `flush_metadata()` (syncfs()s the mount)
@@ -166,7 +169,7 @@ public:
     ///                         written across N creates into O(N)).
     ///
     /// Bulk-init pattern for, e.g., LMCache provisioning of millions
-    /// of pre-allocated KV-shard files.  R11.5: close_file is a no-op
+    /// of pre-allocated KV-shard files.  close_file is a no-op
     /// (NvmeFile is metadata-only, stays resident until delete_file),
     /// so the close_file call below is optional -- included for
     /// symmetry with the non-bulk single-file pattern:
@@ -190,12 +193,11 @@ public:
         uint64_t      size_bytes;
     };
 
-    /// R11.5: batch create `count` files CONCURRENTLY.  Spawns worker
+    /// Batch create `count` files CONCURRENTLY.  Spawns worker
     /// threads internally; each file's FS operations (open/fallocate/
-    /// fiemap/linkat) run WITHOUT the storage mutex (R11.5 split-lock),
-    /// so the threads genuinely parallelize at the NVMe level -- this
-    /// is the library home for what smokes used to hand-roll as a
-    /// `parallel_create` loop.  `flags` is applied to every file
+    /// fiemap/linkat) run WITHOUT the storage mutex (only the
+    /// in-memory bookkeeping is serialized), so the threads genuinely
+    /// parallelize at the NVMe level.  `flags` is applied to every file
     /// (typically NVME_OPEN_CREATE | NVME_OPEN_NO_PERSIST |
     /// NVME_OPEN_NO_SYNC for bulk init).  out[i] corresponds to
     /// specs[i]; nullptr on that file's failure.  Caller MUST call
@@ -217,7 +219,7 @@ public:
     /// dirty, retry is OK).
     virtual bool      flush_metadata(const Device* device) = 0;
 
-    /// R11.5: no-op.  NvmeFile is metadata-only (no held fd) and stays
+    /// No-op.  NvmeFile is metadata-only (no held fd) and stays
     /// resident until delete_file; there is nothing to close or flush.
     /// Durability of written data is the caller's responsibility via
     /// flush_metadata(device) / sync(file).
@@ -264,7 +266,7 @@ public:
     virtual std::vector<std::string> list_file_names(const Device*) const = 0;
 
     // ------------------------------------------------------------------
-    // Host-side blocking IO (R5a)
+    // Host-side blocking IO
     //
     // Useful for:
     //   - bootstrap / metadata writes that don't need GPU paths
@@ -274,10 +276,10 @@ public:
     // Implementation opens a temporary O_DIRECT fd via the .refs/
     // hardlink (pread/pwrite) per call and closes it immediately --
     // data bypasses the page cache entirely.  It is NOT the high-
-    // throughput path -- that's the GPU device-side submit (R5b).
+    // throughput path -- that's the GPU device-side submit below.
     //
     // `byte_offset` is the LOGICAL offset (relative to byte 0 of user
-    // data; R11.5: no header prefix, data_offset is 0).  O_DIRECT
+    // data; no header prefix, data_offset is 0).  O_DIRECT
     // requires byte_offset, len, and the buffer address to all be
     // block-aligned (EINVAL otherwise).
     // ------------------------------------------------------------------
@@ -292,7 +294,7 @@ public:
     virtual bool    sync(NvmeFile* file) = 0;
 
     // ------------------------------------------------------------------
-    // GPU device-side submit (R5b; two-tier async pooled R11.3)
+    // GPU device-side submit
     //
     // These DO NOT open or create a file -- the file is already open
     // (via `open_file` above).  Acquire / release a GPU-side *view*
@@ -301,28 +303,27 @@ public:
     // queue group's d_qps.  Naming intentionally avoids "open" so
     // this isn't confused with `open_file` itself.
     //
-    // R11.3 revision (two-tier cache -- see
-    // memory/include/tiered_handle_cache.h and
-    // doc/tutti_vs_geminifs_rw_and_integration.md):
+    // Handles live in a two-tier cache per cuda device (see
+    // memory/include/tiered_handle_cache.h): a large CPU-pinned L2
+    // (every touched file's built template, FIEMAP work done once)
+    // backs a small GPU-resident L1 (the current working set).  A
+    // single GPU-resident pool sized to hold every file's handle
+    // would cost GBs of scarce GPU memory at LMCache scale (10s of
+    // millions of files); the two-tier split keeps GPU residency
+    // bounded to the working set while amortizing FIEMAP extent work
+    // across the whole file population.  L1 eviction is a downgrade
+    // (content survives in L2, next promotion is a plain memcpy,
+    // never re-walks FIEMAP); only L2 eviction (rare, given its large
+    // budget) is a genuine delete.
     //
-    //   A single GPU-resident pool sized to hold every file's handle
-    //   would cost GBs of scarce GPU memory at LMCache scale (10s of
-    //   millions of files).  Handles now live in a two-tier cache per
-    //   cuda device: a large CPU-pinned L2 (every touched file's
-    //   built template, FIEMAP work done once) backing a small
-    //   GPU-resident L1 (the current working set).  L1 eviction is a
-    //   downgrade (content survives in L2, next promotion is a plain
-    //   memcpy, never re-walks FIEMAP); only L2 eviction (should be
-    //   rare given its large budget) is a genuine delete.
-    //
-    //   Consequence for this API: acquire_device_handle is now
+    //   Consequence for this API: acquire_device_handle is
     //   idempotent / safe to call repeatedly for the same file (cache
     //   hit is nearly free) -- it is "ensure resident", not "allocate
-    //   once".  release_device_handle no longer takes the handle
-    //   pointer (GPU addresses are recycled across tiers and no
-    //   longer uniquely identify a file) -- it takes the NvmeFile*
-    //   itself and means "you may downgrade this from L1 now", a hint
-    //   the LRU would eventually act on anyway.
+    //   once".  release_device_handle takes the NvmeFile* itself, not
+    //   the handle pointer (GPU addresses are recycled across tiers
+    //   and no longer uniquely identify a file), and means "you may
+    //   downgrade this from L1 now", a hint the LRU would eventually
+    //   act on anyway.
     //
     // configure_handle_pool  MUST be called once, after bootstrap()
     //                        and before the first acquire_device_handle,
@@ -403,15 +404,15 @@ public:
                                               GpuStreamHandle       stream,
                                               NvmeFileDeviceHandle** out_handles) = 0;
 
-    /// R11.5: Pre-load `file`'s handle template into the L2 (CPU-pinned)
+    /// Pre-load `file`'s handle template into the L2 (CPU-pinned)
     /// metadata cache WITHOUT promoting to L1 (GPU-resident).  Useful
     /// for bulk pre-warming after a bulk-create: call this for each
     /// file so the first acquire_device_handle is a fast L2->L1
     /// promotion (one memcpy) instead of a cold build (FIEMAP walk +
     /// overflow cudaMalloc).  No-op if the handle pool was never
     /// configured (pure host-side users) or the file's Device has no
-    /// queue_group.  open_file no longer admits automatically (R11.5
-    /// made it lazy); callers who want pre-warming call this explicitly.
+    /// queue_group.  Admission is lazy -- open_file does not call this
+    /// automatically; callers who want pre-warming call it explicitly.
     virtual void admit_to_cache(NvmeFile* file) = 0;
 
     /// Cumulative two-tier handle-cache counters, summed across every

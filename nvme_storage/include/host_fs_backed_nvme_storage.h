@@ -18,27 +18,27 @@
  *
  *   - create_file:
  *       1. open(<mount>/.tutti/<name>.bin, O_CREAT|O_RDWR)
- *       2. fallocate(size)   [R11.5: no in-band header -- user data
+ *       2. fallocate(size)   [no in-band header -- user data
  *          starts at byte 0; all metadata lives in PersistentFileLog]
  *       3. fsync (unless NVME_OPEN_NO_SYNC)
  *       4. read_extents(fd) -> LbaExtent[]
- *       5. linkat(.refs/<name>.bin)  [R11.5: inode refcount so an
+ *       5. linkat(.refs/<name>.bin)  [inode refcount so an
  *          external `rm` of the original path doesn't free the inode
  *          while a GPU kernel may still be reading through its LBAs]
- *       6. close(fd)  [R11.5: NvmeFile is metadata-only -- no held fd]
+ *       6. close(fd)  [NvmeFile is metadata-only -- no held fd]
  *       7. PersistentFileLog::add() + persist()
  *       8. return NvmeFile*
  *
  *   - read/write/sync open a TEMPORARY fd via the .refs/ hardlink
  *     (pread/pwrite/fsync) and close it immediately after.  No fd is
  *     held between calls.  `byte_offset` is logical (relative to byte
- *     0 of user data); data_offset is 0 (R11.5: no header prefix).
+ *     0 of user data); data_offset is 0 (no header prefix).
  *
- *   - close_file: no-op (R11.5: no fd, no cache eviction; the file
+ *   - close_file: no-op (no fd, no cache eviction; the file
  *     stays resident in s->files until delete_file).
  *
  *   - shutdown:
- *       1. syncfs() the mount if dirty (R11.5: no held fds to close).
+ *       1. syncfs() the mount if dirty (no held fds to close).
  *       2. PersistentFileLog::persist() one last time.
  *       3. umount(2) every mount in reverse order.
  *
@@ -162,7 +162,7 @@ private:
     bool mount_if_needed_locked(PerDeviceState& s);
     bool umount_locked(PerDeviceState& s);
 
-    // R11.5: FS operations (open/fallocate/fiemap/linkat) run WITHOUT
+    // FS operations (open/fallocate/fiemap/linkat) run WITHOUT
     // mtx_ so bulk-create parallelizes; the bookkeeping section (log
     // add, files map insert, dirty flags) re-acquires mtx_ internally.
     // Caller must NOT hold mtx_ when calling this.
@@ -195,17 +195,16 @@ private:
     std::vector<std::unique_ptr<PerDeviceState>> states_;   // device order
     bool                            booted_ = false;
 
-    // ---- GPU-resident overflow-extent bookkeeping (R5b, compact
-    // handle sizing) ----
+    // ---- GPU-resident overflow-extent bookkeeping ----
     // acquire_device_handle() cudaMalloc's a small `LbaExtent[]`
     // overflow buffer only for files whose FIEMAP extent count
     // exceeds kNvmeFileDeviceHandleInlineExtents (rare: heavy
     // fragmentation).  Unlike the pooled handle slot itself, overflow
     // buffers are NOT pooled -- they're rare and variably sized, not
     // worth a slab allocator.  Tracked host-side keyed by NvmeFileId
-    // (stable) rather than by handle pointer (R11.3: GPU addresses
-    // are recycled across L1/L2 tiers and no longer uniquely / stably
-    // identify a file), so it survives however many times a file's
+    // (stable) rather than by handle pointer, since GPU addresses are
+    // recycled across the L1/L2 tiers and no longer uniquely / stably
+    // identify a file, so it survives however many times a file's
     // handle round-trips between L1 and L2.  Freed only when the file
     // itself is erased from the cache (delete_file) via a
     // stream-ordered `cudaLaunchHostFunc`, mirroring the deferred-free
@@ -214,10 +213,9 @@ private:
     std::mutex                                  overflow_mtx_;
     std::unordered_map<NvmeFileId, void*>       overflow_by_file_;
 
-    // ---- two-tier handle METADATA cache (R11.3: CPU-pinned L2
-    // backing a small GPU-resident L1 -- see
-    // memory/include/tiered_handle_cache.h and
-    // doc/tutti_vs_geminifs_rw_and_integration.md) ----
+    // ---- two-tier handle METADATA cache (CPU-pinned L2 backing a
+    // small GPU-resident L1 -- see
+    // memory/include/tiered_handle_cache.h) ----
     //
     // "metadata" is deliberate in every name here (metadata_caches_,
     // admit_to_metadata_cache_, ...): this caches the GPU-side handle

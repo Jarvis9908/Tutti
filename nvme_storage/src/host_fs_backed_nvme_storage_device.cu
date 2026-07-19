@@ -2,7 +2,7 @@
  * host_fs_backed_nvme_storage_device.cu -- GPU-side bring-up + tear-
  *                                          down of NvmeFileDeviceHandle.
  *
- * Layer: nvme_storage (R5b; two-tier async pooled R11.3).
+ * Layer: nvme_storage.
  *
  * Split out from host_fs_backed_nvme_storage.cpp so the host-side
  * file (which is .cpp) doesn't have to start dragging in CUDA
@@ -10,20 +10,18 @@
  * unit only knows about cudaMalloc / cudaMemcpy / cudaFree /
  * cudaLaunchHostFunc (transitively, via TieredHandleCache).
  *
- * R11.3: handles now live in a per-cuda-device
+ * Handles live in a per-cuda-device
  * TieredHandleCache<NvmeFileDeviceHandle, NvmeFileId> (CPU-pinned L2
- * backing a small GPU-resident L1) instead of a single-tier
- * GpuSlotPool -- see nvme_storage.h's updated doc comment and
- * doc/tutti_vs_geminifs_rw_and_integration.md for the full
- * rationale.  acquire_device_handle is now "ensure resident"
- * (idempotent); release_device_handle takes the NvmeFile* itself
- * (not the recycled GPU pointer) and is an advisory "may downgrade
- * now" hint.
+ * backing a small GPU-resident L1) rather than a single-tier
+ * GpuSlotPool -- see nvme_storage.h's doc comment for the full
+ * rationale.  acquire_device_handle is "ensure resident" (idempotent);
+ * release_device_handle takes the NvmeFile* itself (not the recycled
+ * GPU pointer) and is an advisory "may downgrade now" hint.
  *
  * The rare heavily-fragmented file's overflow extent buffer is still
  * a genuine per-file cudaMalloc (not tiered -- rare + variably sized,
  * not worth it), tracked by NvmeFileId (stable) instead of by handle
- * pointer (which now gets recycled across L1 slots).
+ * pointer (which gets recycled across L1 slots).
  */
 
 #include "host_fs_backed_nvme_storage.h"
@@ -190,7 +188,7 @@ bool HostFsBackedNvmeStorage::build_handle_template_(
     std::memset(out, 0, sizeof(*out));
     out->file_id              = file->id;
     out->logical_size_bytes   = file->size_bytes;
-    out->header_bytes         = 0;   // R11.5: no in-band header prefix
+    out->header_bytes         = 0;   // no in-band header prefix
     out->nvme_block_size      = bp->blk_size;
     out->nvme_block_size_log  = bp->blk_size_log;
     out->namespace_id         = bp->namespace_id;
@@ -395,9 +393,9 @@ bool HostFsBackedNvmeStorage::acquire_device_handles_batch(
 }
 
 void HostFsBackedNvmeStorage::admit_to_cache(NvmeFile* file) {
-    // R11.5: public wrapper around the private admit.  open_file no
-    // longer calls this automatically (lazy); callers who want to
-    // pre-warm the L2 cache call this explicitly.
+    // Public wrapper around the private admit.  open_file does not
+    // call this automatically (admission is lazy); callers who want
+    // to pre-warm the L2 cache call this explicitly.
     admit_to_metadata_cache_(file);
 }
 

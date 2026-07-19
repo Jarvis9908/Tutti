@@ -1,32 +1,28 @@
 /**
- * nvme_batch_xfer_kernel.cu -- R8.2 GPU batch IO kernel + launch wrapper.
+ * nvme_batch_xfer_kernel.cu -- GPU batch IO kernel + launch wrapper.
  *
- * Field-for-field analogue of the legacy nvme_batch_xfer_kernel from
- * the pre-refactor monolithic GPU-file path,
- *   retargeted onto the post-refactor types:
+ * Types involved:
  *
- *   legacy NVMeFilesSpan          -> NvmeBatchEntry::shards + num_shards
- *   legacy PRPMappingEntry*       -> NvmeBatchEntry::prp_entry (= R7
- *                                    AddressDescriptor*)
- *   legacy nvme_controller_g_*    -> R5b submit_{read,write}_one
- *                                    (nvme_storage_device.cuh)
+ *   NvmeBatchEntry::shards + num_shards  -- per-IO shard pointer table
+ *   NvmeBatchEntry::prp_entry            -- AddressDescriptor* (PRP)
+ *   submit_{read,write}_one              -- on-GPU submit primitives
+ *                                            (nvme_storage_device.cuh)
  *
- * Stripe selection runs on the GPU (the legacy choice that user Q3
- * confirmed): the same input tensor's sub-slices land on different
- * shards in one batch via `fd_idx = gpu_blk % num_shards`.
+ * Stripe selection runs on the GPU: the same input tensor's
+ * sub-slices land on different shards in one batch via
+ * `fd_idx = gpu_blk % num_shards`.
  *
- * Virtual-file -> physical-LBA translation runs inside R5b's
+ * Virtual-file -> physical-LBA translation runs inside
  * `submit_*_one` (resolve_lba walks the NvmeFile's extent list).
- * That's stage (3b) in R8_io_engine_plan.md §3.1.
  */
 
 #include "launch_batch.h"
 #include "nvme_batch.h"
 
-// R7 AddressDescriptor (carries prp1/prp2/data_length).
+// AddressDescriptor (carries prp1/prp2/data_length).
 #include "memory_subsystem.h"
 
-// R5b on-GPU submit primitives + NvmeFileDeviceHandle.
+// On-GPU submit primitives + NvmeFileDeviceHandle.
 #include "nvme_storage_device.cuh"
 #include "nvme_file_device_handle.h"
 

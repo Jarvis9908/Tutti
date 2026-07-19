@@ -7,8 +7,7 @@
  *
  * Layer: memory.
  *
- * Why two tiers (see doc/tutti_vs_geminifs_rw_and_integration.md for
- * the full discussion this design resolves):
+ * Why two tiers:
  *
  *   A single GPU-resident pool sized to hold every file's handle
  *   (millions, at LMCache scale) would cost tens of GB of scarce GPU

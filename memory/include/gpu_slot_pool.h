@@ -7,50 +7,34 @@
  *
  * Layer: memory.
  *
- * R11.2 revision -- event-fenced release instead of async
- * host-callback return:
+ * Release semantics: release() is CPU-side immediate -- a freed slot
+ * reappears in the free list synchronously, so a subsequent acquire
+ * in the SAME call can reuse it right away.  This is required by
+ * TieredHandleCache's "evict one LRU slot, then immediately reuse it"
+ * pattern, which has no intervening sync point to hang a deferred
+ * (host-callback-based) release off of.  GPU-side correctness is
+ * guaranteed separately, by an event fence, so a slot's previous
+ * contents are never overwritten by a new fill before the GPU has
+ * actually finished reading them.
  *
- *   The R11.1 design returned a slot via `cudaLaunchHostFunc` (mirror
- *   of legacy GeminiFS's `release_ioctx` pattern): the slot only
- *   became reusable once the GPU actually reached that point on the
- *   releasing stream.  That is correct in isolation, but breaks
- *   TieredHandleCache's "evict one LRU slot, then immediately reuse
- *   it" pattern: nothing ever advances the GPU past the release
- *   point within that same call (no intervening sync), so the
- *   host-callback never fires and the freed slot never reappears in
- *   the free list -- the very next acquire in the same call sees the
- *   pool as still full and fails.  This was caught by
- *   tiered_handle_cache_smoke's batch-eviction path, not by
- *   inspection -- a good reminder that this kind of state machine
- *   needs an executable proof, not just a design review.
+ * Event granularity: ONE event per PRODUCER STREAM, not one per slot.
+ * This pool is sized to a memory BUDGET (see coordinator_config.h's
+ * handle_l1_gpu_budget_bytes), which at the default 512 MiB / ~200
+ * B-per-slot payload works out to capacity in the HUNDREDS OF
+ * THOUSANDS to LOW MILLIONS -- creating one `cudaEvent` per slot
+ * would be a real, measurable startup cost, and recording one per
+ * slot on every batch fill/release would be pure waste, since a
+ * whole batch is filled by ONE `cudaMemcpyAsync` and typically
+ * consumed by ONE downstream kernel/transfer call: there is only
+ * ever ONE fence point that matters per batch operation, not one per
+ * slot in it.
  *
- *   The fix: release is CPU-side immediate (the slot reappears in
- *   the free list synchronously, so a subsequent acquire in the same
- *   call can reuse it right away), and GPU-side correctness is
- *   guaranteed by an EVENT FENCE instead of a delayed return.
- *
- * R11.4 revision -- ONE event per PRODUCER STREAM, not per slot:
- *
- *   R11.2 gave every slot its own private `cudaEvent`.  That is fine
- *   at a few hundred/thousand slots, but this pool is sized to a
- *   memory BUDGET (see coordinator_config.h's handle_l1_gpu_budget_bytes),
- *   which at the default 512 MiB / ~200 B-per-slot payload works out
- *   to capacity in the HUNDREDS OF THOUSANDS to LOW MILLIONS.
- *   `cudaEventCreateWithFlags` that many times at init() is a real,
- *   measurable multi-second startup cost, and `acquire_batch_from_host_async`
- *   /`release_batch_async` calling `cudaEventRecord` once PER SLOT in
- *   a batch is pure waste: a whole batch is filled by ONE
- *   `cudaMemcpyAsync` and typically consumed by ONE downstream
- *   kernel/transfer call -- there is only ever ONE fence point that
- *   matters per batch operation, not one per slot in it.
- *
- *   Fix: slots no longer own an event at all.  Instead, each slot
- *   just remembers WHICH STREAM last touched it
+ *   Each slot just remembers WHICH STREAM last touched it
  *   (`last_touch_stream_[idx]`); a small `stream -> cudaEvent_t` map
  *   (`stream_events_`, lazily populated, one entry per DISTINCT
  *   stream actually used -- typically a handful in real deployments,
  *   never anywhere near `capacity`) supplies the shared event to
- *   record/wait on.  A batch fill/release now does exactly ONE
+ *   record/wait on.  A batch fill/release does exactly ONE
  *   `cudaEventRecord` (on the batch's single `stream` parameter) no
  *   matter how many slots are in the batch.
  *
@@ -126,7 +110,7 @@ public:
 
     /// One-time setup: cudaMalloc(capacity * sizeof(T)) on
     /// `cuda_device`.  Events are created lazily, one per DISTINCT
-    /// stream actually used (see the R11.4 file comment) -- none are
+    /// stream actually used (see the file comment above) -- none are
     /// created here.  Returns false on any CUDA failure.
     bool init(uint32_t capacity, int cuda_device) {
         if (capacity == 0) {
@@ -157,7 +141,7 @@ public:
         }
 
         // Per-slot bookkeeping only -- NO events allocated here (see
-        // the R11.4 file comment); `last_touch_stream_[i]` is
+        // the file comment above); `last_touch_stream_[i]` is
         // meaningless until `ever_recorded_[i]` is set.
         last_touch_stream_.assign(capacity, nullptr);
         ever_recorded_.assign(capacity, 0);
@@ -305,8 +289,8 @@ public:
     /// freed slots should fall back to individual acquires, same as
     /// the "bump exhausted" fallback already documented at the call
     /// sites in tiered_handle_cache.h).  Records the shared event for
-    /// `stream` exactly ONCE for the whole batch (see the R11.4 file
-    /// comment), then stamps every slot with `stream` as its
+    /// `stream` exactly ONCE for the whole batch (see the file
+    /// comment above), then stamps every slot with `stream` as its
     /// last-touch.
     ///
     /// Returns false (no slots taken) if the bump region can't
@@ -394,8 +378,8 @@ public:
 
     /// Batch release: same immediate-CPU-side-effect, event-fenced
     /// semantics as `release_async`, for `count` slots -- but ONE
-    /// shared-event record for the whole batch (see the R11.4 file
-    /// comment) instead of `count`, plus ONE lock acquisition for the
+    /// shared-event record for the whole batch (see the file comment
+    /// above) instead of `count`, plus ONE lock acquisition for the
     /// free-list update.
     void release_batch_async(T* const* slots, uint32_t count, cudaStream_t stream) {
         if (count == 0) return;
@@ -439,9 +423,9 @@ private:
         free_list_.push_back(idx);
     }
 
-    // Get-or-create the shared event for `stream` (R11.4: one event
+    // Get-or-create the shared event for `stream` (one event
     // per DISTINCT stream ever used by this pool, not one per slot --
-    // see the file comment).  Returns nullptr (with a diagnostic) on
+    // see the file comment above).  Returns nullptr (with a diagnostic) on
     // CUDA failure; callers treat that as "skip the record/wait"
     // (matches this pool's existing best-effort diagnostic style for
     // CUDA call failures elsewhere).
@@ -484,7 +468,7 @@ private:
     uint32_t                    next_bump_    = 0;   // first never-yet-used index
     std::deque<uint32_t>        free_list_;           // reclaimed (released) indices
 
-    // R11.4: shared per-producer-stream events, lazily created --
+    // Shared per-producer-stream events, lazily created --
     // bounded by the number of DISTINCT streams actually used, not by
     // `capacity_`.  Separate mutex from `mtx_` (guards unrelated
     // free-list/bump bookkeeping) so a stream_events_ lookup never

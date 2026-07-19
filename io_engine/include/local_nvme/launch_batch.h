@@ -4,10 +4,7 @@
 /**
  * launch_batch.h -- host-callable wrapper that launches the
  * nvme_batch_xfer_kernel for an already-staged device-resident
- * NvmeBatchEntry array (R8.2).
- *
- * Spec: doc/refactor/R8_io_engine_plan.md §4 (R8.2 milestone) +
- *       §3.3 (the kernel body).
+ * NvmeBatchEntry array.
  *
  * Why a separate header from `nvme_batch.h`:
  *   - `nvme_batch.h` carries POD types only; both host TUs and
@@ -23,8 +20,8 @@
  *   - The kernel reads `e.shards[fd_idx]` and `e.prp_entry->...`
  *     directly: those pointers (set by `build_nvme_batch`) MUST be
  *     GPU-resident.  In the standard pipeline:
- *       e.shards    = GpuFileHandle::d_shards_dev   (R8.1)
- *       e.prp_entry = IoSliceView::d_ios + sub      (R7)
+ *       e.shards    = GpuFileHandle::d_shards_dev
+ *       e.prp_entry = IoSliceView::d_ios + sub
  *     both already-GPU-resident, no extra staging needed.
  *
  * Lifetime:

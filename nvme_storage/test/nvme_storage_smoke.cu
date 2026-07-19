@@ -35,7 +35,7 @@
 #include "nvme_storage.h"
 
 #include "../../device_manager/include/local_nvme_direct_registry.h"
-#include "../../runtime/include/device.h"
+#include "../../coordinator/include/device.h"
 
 #include <cuda_runtime.h>
 

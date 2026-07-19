@@ -1,16 +1,15 @@
 /**
- * local_nvme_io_engine.cpp -- LocalNvmeIoEngine impl (R8.3).
+ * local_nvme_io_engine.cpp -- LocalNvmeIoEngine impl.
  *
- * Glue between the R8.1 host_batch_builder and the R8.2
- * launch_nvme_batch_xfer GPU launch wrapper, behind the IIoEngine
- * interface.
+ * Glue between host_batch_builder and the launch_nvme_batch_xfer
+ * GPU launch wrapper, behind the IIoEngine interface.
  */
 
 #include "local_nvme_io_engine.h"
 
 #include "host_batch_builder.h"
 #include "launch_batch.h"
-#include "memory_subsystem.h"   // IMemorySubsystem (R7)
+#include "memory_subsystem.h"   // IMemorySubsystem
 
 #include <cuda_runtime.h>
 
