@@ -105,6 +105,12 @@ tutti_add_cuda_smoke(kv_cache_e2e_stress adapters/kv_cache_e2e_stress.cu
     tutti_kv_adapter tutti_coordinator tutti_block_storage tutti_nvme_storage
     tutti_memory tutti_device_manager libnvm CUDA::cudart)
 
+# Layerwise KV-cache R/W with 3-stream compute/read/write overlap
+# (HY3-shaped 128K-context request at 90% hit rate; nsys-oriented).
+tutti_add_cuda_smoke(kv_cache_layerwise_overlap adapters/kv_cache_layerwise_overlap.cu
+    tutti_kv_adapter tutti_coordinator tutti_block_storage tutti_nvme_storage
+    tutti_memory tutti_device_manager libnvm CUDA::cudart)
+
 # ---- phoenix conflict diagnostic ------------------------------------------
 # Standalone diagnostic: tests nvm_dma_map_data_device (snvme.ko ->
 # nvidia_p2p_get_pages) on a target GPU to pinpoint whether Phoenix's

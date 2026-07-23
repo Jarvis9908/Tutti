@@ -82,7 +82,16 @@ nvmes:
     namespace_id: 1
     kernel_ioq_cap: 32
     allowed_gpus: [0]
-
+  - pci_addr: "0000:57:00.0"      # NVMe #0 -> daemon device_id=0
+    mount_path: "/mnt/nvme3"
+    namespace_id: 1
+    kernel_ioq_cap: 32
+    allowed_gpus: [0]
+  - pci_addr: "0000:63:00.0"      # NVMe #1 -> daemon device_id=1
+    mount_path: "/mnt/nvme4"
+    namespace_id: 1
+    kernel_ioq_cap: 32
+    allowed_gpus: [0]
 # ---------------------------------------------------------------------------
 # Per-client allocation policy (daemon-side guidance, NOT a kernel ledger).
 #
@@ -93,8 +102,8 @@ nvmes:
 #                       currently NVM_MAX_QUEUES_PER_GROUP=16).
 # ---------------------------------------------------------------------------
 queue_pool:
-  default_per_client: 16
-  max_per_client: 32
+  default_per_client: 32
+  max_per_client: 64
 
 # ---------------------------------------------------------------------------
 # Lease lifetime parameters.
