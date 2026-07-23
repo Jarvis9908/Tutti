@@ -13,11 +13,20 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <set>
 #include <unordered_set>
 #include <utility>
+
+// Info-level bring-up logging is opt-in: quiet by default so benchmark
+// and nsys runs stay readable; set TUTTI_VERBOSE=1 to re-enable.
+static bool tutti_verbose() {
+    static const bool v = std::getenv("TUTTI_VERBOSE") != nullptr;
+    return v;
+}
+#define TUTTI_INFO(...) do { if (tutti_verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
 
 namespace tutti {
 
@@ -183,7 +192,7 @@ bool HostFsBackedBlockStorage::bootstrap(
         for (auto& s : states_) {
             if (s.get() == leader) continue;
             if (s->log->generation() < max_gen) {
-                std::fprintf(stderr,
+                TUTTI_INFO(
                     "[block_storage] bootstrap: device %d log generation "
                     "%lu < leader %lu (dev=%d); pulling leader's view\n",
                     s->device->device_id,
@@ -219,7 +228,7 @@ bool HostFsBackedBlockStorage::bootstrap(
     }
 
     is_open_ = true;
-    std::fprintf(stderr,
+    TUTTI_INFO(
         "[block_storage] bootstrap ready: devices=%zu entries=%zu\n",
         states_.size(),
         states_.empty() ? 0 : states_.front()->log->size());
@@ -1017,10 +1026,29 @@ ShardPtrSlot* HostFsBackedBlockStorage::resolve_shard_slot_(
     ShardPtrSlot* slot = nullptr;
     auto rit = resident_slot_.find(id);
     if (rit != resident_slot_.end()) {
-        // Already resident -- reuse the same GPU slot, but ALWAYS
-        // rewrite its content (see the ShardPool doc comment: a
-        // shard's underlying pointer may have moved since last time).
         slot = rit->second;
+        // Already resident.  Skip the content rewrite when the value is
+        // UNCHANGED (the common case: every shard handle kept its L1
+        // slot since the previous acquire).  The old always-rewrite
+        // policy cost ONE 32 B cudaMemcpyAsync per file per batch
+        // (~460 API calls per KV-cache-shaped batch); the comparison
+        // is exact because ShardPtrSlot is zero-initialised POD and a
+        // shard pointer only changes when nvme_storage's cache moves
+        // that handle -- which always shows up as a different `value`.
+        auto vit = resident_value_.find(id);
+        if (vit != resident_value_.end() &&
+            std::memcmp(&vit->second, &value, sizeof(ShardPtrSlot)) == 0) {
+            // The GPU copy is already correct.  Fence `stream` against
+            // the slot's last fill (cheap; a no-op same-stream), touch
+            // the LRU, done -- no cudaMemcpyAsync at all.
+            sp->gpu->wait_ready(slot, stream);
+            auto lit = lru_pos_.find(id);
+            if (lit != lru_pos_.end()) lru_.erase(lit->second);
+            lru_.push_front(id);
+            lru_pos_[id] = lru_.begin();
+            return slot;
+        }
+        // Value changed (a shard handle moved): rewrite as before.
         const uint32_t idx = (uint32_t)(slot - sp->gpu->slot_ptr(0));
         sp->pinned_staging[idx] = value;
         cudaError_t cerr = cudaMemcpyAsync(slot, &sp->pinned_staging[idx],
@@ -1033,6 +1061,7 @@ ShardPtrSlot* HostFsBackedBlockStorage::resolve_shard_slot_(
             return nullptr;
         }
         sp->gpu->mark_filled(idx, stream);
+        resident_value_[id] = value;
         // touch LRU
         auto lit = lru_pos_.find(id);
         if (lit != lru_pos_.end()) lru_.erase(lit->second);
@@ -1065,6 +1094,7 @@ ShardPtrSlot* HostFsBackedBlockStorage::resolve_shard_slot_(
             sp->gpu->release_async(vit->second, stream);
             resident_slot_.erase(vit);
         }
+        resident_value_.erase(victim);
         slot = sp->gpu->reserve_slot(stream, &idx);
         if (slot == nullptr) return nullptr;
     }
@@ -1082,6 +1112,7 @@ ShardPtrSlot* HostFsBackedBlockStorage::resolve_shard_slot_(
     sp->gpu->mark_filled(idx, stream);
 
     resident_slot_[id] = slot;
+    resident_value_[id] = value;
     lru_.push_front(id);
     lru_pos_[id] = lru_.begin();
     return slot;
@@ -1096,6 +1127,7 @@ void HostFsBackedBlockStorage::release_shard_slot_(GpuFileId id, cudaStream_t st
     if (rit == resident_slot_.end()) return;   // not resident -- nothing to do
     sp->gpu->release_async(rit->second, stream);
     resident_slot_.erase(rit);
+    resident_value_.erase(id);
     auto lit = lru_pos_.find(id);
     if (lit != lru_pos_.end()) { lru_.erase(lit->second); lru_pos_.erase(lit); }
 }

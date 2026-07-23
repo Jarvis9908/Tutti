@@ -190,16 +190,23 @@ private:
     // while blocking on anything else).
     std::mutex                                          resident_mtx_;
     std::unordered_map<GpuFileId, ShardPtrSlot*>        resident_slot_;
+    // Last value written into each resident slot.  resolve_shard_slot_
+    // skips the H2D rewrite entirely when the freshly-resolved value
+    // memcmp-equals this one (the common case: no shard handle moved
+    // since the previous batch) -- one cheap wait_ready fence instead
+    // of one 32 B cudaMemcpyAsync per file per batch.  Same lifetime
+    // as resident_slot_, guarded by resident_mtx_.
+    std::unordered_map<GpuFileId, ShardPtrSlot>         resident_value_;
     std::list<GpuFileId>                                lru_;
     std::unordered_map<GpuFileId, std::list<GpuFileId>::iterator> lru_pos_;
 
     ShardPool* get_or_init_pool_();
 
     // Ensures `file->id` has a resident ShardPtrSlot, rewriting its
-    // content from `value` (always -- see the ShardPool doc comment
-    // above) and evicting the LRU tail (advisory-released, i.e. not
-    // itself in-flight elsewhere) if the pool is full and this is a
-    // new residency.  `protect`, if non-null, excludes those ids
+    // content from `value` ONLY when it actually changed (see
+    // resident_value_ above) and evicting the LRU tail
+    // (advisory-released, i.e. not itself in-flight elsewhere) if the
+    // pool is full and this is a new residency.  `protect`, if non-null, excludes those ids
     // from eviction consideration -- used by
     // acquire_device_handles_batch so resolving file N of a batch
     // never evicts the slot just resolved for file N-1 of the SAME
