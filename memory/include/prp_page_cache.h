@@ -70,6 +70,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <list>
 #include <mutex>
@@ -150,8 +151,9 @@ public:
         last_touch_stream_.assign(cap, nullptr);
         slot_ever_touched_.assign(cap, 0);
         cudaSetDevice(prev);
-        std::fprintf(stderr,
-            "[prp_cache] init: scatter-patch staging = %u pairs\n", cap);
+        if (std::getenv("TUTTI_VERBOSE") != nullptr)
+            std::fprintf(stderr,
+                "[prp_cache] init: scatter-patch staging = %u pairs\n", cap);
         return true;
     }
 

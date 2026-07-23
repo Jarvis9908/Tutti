@@ -28,7 +28,16 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <utility>
+
+// Info-level bring-up logging is opt-in: quiet by default so benchmark
+// and nsys runs stay readable; set TUTTI_VERBOSE=1 to re-enable.
+static bool tutti_verbose() {
+    static const bool v = std::getenv("TUTTI_VERBOSE") != nullptr;
+    return v;
+}
+#define TUTTI_INFO(...) do { if (tutti_verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
 
 namespace tutti {
 
@@ -70,7 +79,7 @@ bool Coordinator::bootstrap(const CoordinatorConfig& cfg) {
         if (computed == 0) computed = 1;
         computed = std::min<std::size_t>(computed, 0xFFFFFFFFull);
         handle_l1_capacity_ = (uint32_t)computed;
-        std::fprintf(stderr,
+        TUTTI_INFO(
             "[coordinator] handle_l1_capacity AUTO = %u files (budget=%llu "
             "B / per_file=%zu B [kGpuFileMaxShards=%u * "
             "(sizeof(NvmeFileDeviceHandle)=%zu B + sizeof(void*)=%zu B)])\n",
@@ -89,7 +98,7 @@ bool Coordinator::bootstrap(const CoordinatorConfig& cfg) {
         if (computed == 0) computed = 1;
         computed = std::min<std::size_t>(computed, 0xFFFFFFFFull);
         handle_l2_capacity_ = (uint32_t)computed;
-        std::fprintf(stderr,
+        TUTTI_INFO(
             "[coordinator] handle_l2_capacity AUTO = %u files (budget=%llu "
             "B / per_file=%zu B)\n",
             handle_l2_capacity_, (unsigned long long)budget, per_file_bytes);

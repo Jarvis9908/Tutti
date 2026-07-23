@@ -20,10 +20,19 @@
 #include "nvmeservice_client.h"   // backends/local/NVMeService/src/
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <utility>
 #include <vector>
+
+// Info-level bring-up logging is opt-in: quiet by default so benchmark
+// and nsys runs stay readable; set TUTTI_VERBOSE=1 to re-enable.
+static bool tutti_verbose() {
+    static const bool v = std::getenv("TUTTI_VERBOSE") != nullptr;
+    return v;
+}
+#define TUTTI_INFO(...) do { if (tutti_verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
 
 namespace tutti {
 
@@ -78,7 +87,7 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
         std::fprintf(stderr, "[svc-registry] Connect rejected\n");
         return false;
     }
-    std::fprintf(stderr,
+    TUTTI_INFO(
         "[svc-registry] connect ok: daemon_dev=%d cuda=%d granted=%d "
         "snvme=%s bar0=%llu page=%u blk=%u qdepth=%u\n",
         req.daemon_device_id, req.cuda_device, sess->granted_queues,
@@ -114,7 +123,7 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
         // sess goes out of scope and Disconnects automatically.
         return false;
     }
-    std::fprintf(stderr,
+    TUTTI_INFO(
         "[svc-registry] attach_client ok: ctrl=%p\n", (void*)bp->ctrl);
 
     // Stamp the RPC-provided q_depth onto the client ctrl.  A ctrl
@@ -240,7 +249,7 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
         std::snprintf(d.disk_name, sizeof(d.disk_name),
                       "%sn%u", tail, ns_id);
 
-        std::fprintf(stderr,
+        TUTTI_INFO(
             "[svc-registry] building queue group: nq=%u qd=%u ns=%u "
             "disk=%s page=%u blk=%u\n",
             nq, qd, ns_id, d.disk_name, d.page_size, d.block_size);
@@ -261,12 +270,12 @@ bool NvmeServiceBackedRegistry::open_one(const NvmeServiceBackedRequest& req,
             bp->ctrl = nullptr;
             return false;
         }
-        std::fprintf(stderr,
+        TUTTI_INFO(
             "[svc-registry] queue group ok: n_qps=%u group_id=%u\n",
             bp->queue_group->n_qps(), bp->queue_group->group_id());
     }
 
-    std::fprintf(stderr,
+    TUTTI_INFO(
         "[svc-registry] open_one done: device_id=%d\n", device_id);
     out.backend_private = std::move(bp);
     return true;

@@ -30,6 +30,14 @@ namespace tutti {
 
 namespace {
 
+// Info-level bring-up logging is opt-in: quiet by default so benchmark
+// and nsys runs stay readable; set TUTTI_VERBOSE=1 to re-enable.
+bool tutti_verbose() {
+    static const bool v = std::getenv("TUTTI_VERBOSE") != nullptr;
+    return v;
+}
+#define TUTTI_INFO(...) do { if (tutti_verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
+
 constexpr uint32_t kNvmeBlockSize = 4096;   // matches all NVMe deployments
                                             // we currently support; the
                                             // bootstrap path validates against
@@ -53,7 +61,7 @@ bool is_mounted(const std::string& mount_point) {
 
 // Run a system command, log the command line, return true on rc=0.
 bool run_cmd(const std::string& cmd) {
-    std::fprintf(stderr, "[nvme_storage] $ %s\n", cmd.c_str());
+    TUTTI_INFO("[nvme_storage] $ %s\n", cmd.c_str());
     int rc = std::system(cmd.c_str());
     if (rc != 0) {
         std::fprintf(stderr,
@@ -198,7 +206,7 @@ bool HostFsBackedNvmeStorage::mkfs_if_needed_locked(const std::string& blk_path)
             if (*c == '\n' || *c == '\r') { *c = 0; break; }
         }
         ::pclose(fp);
-        std::fprintf(stderr,
+        TUTTI_INFO(
             "[nvme_storage] %s already formatted (TYPE=%s); reusing\n",
             blk_path.c_str(), line);
         return true;
@@ -231,7 +239,7 @@ bool HostFsBackedNvmeStorage::mount_if_needed_locked(PerDeviceState& s) {
     }
 
     if (is_mounted(s.mount_path)) {
-        std::fprintf(stderr,
+        TUTTI_INFO(
             "[nvme_storage] %s is already a mount point; reusing\n",
             s.mount_path.c_str());
         s.we_mounted = false;
@@ -248,7 +256,7 @@ bool HostFsBackedNvmeStorage::mount_if_needed_locked(PerDeviceState& s) {
         return false;
     }
     s.we_mounted = true;
-    std::fprintf(stderr,
+    TUTTI_INFO(
         "[nvme_storage] mounted %s -> %s\n",
         s.snvme_blk_path.c_str(), s.mount_path.c_str());
     return true;
@@ -518,7 +526,7 @@ bool HostFsBackedNvmeStorage::bootstrap(
         //    Best-effort -- never fails bootstrap.
         (void)reconcile_locked_(*sp);
 
-        std::fprintf(stderr,
+        TUTTI_INFO(
             "[nvme_storage] device %d ready: blk=%s mount=%s entries=%zu\n",
             dev->device_id, sp->snvme_blk_path.c_str(),
             sp->mount_path.c_str(), sp->log->size());

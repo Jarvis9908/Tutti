@@ -32,6 +32,14 @@
 #include <utility>
 #include <cstdio>
 
+// Info-level bring-up logging is opt-in: quiet by default so benchmark
+// and nsys runs stay readable; set TUTTI_VERBOSE=1 to re-enable.
+static bool tutti_verbose() {
+    static const bool v = std::getenv("TUTTI_VERBOSE") != nullptr;
+    return v;
+}
+#define TUTTI_INFO(...) do { if (tutti_verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
+
 namespace tutti {
 
 // ---------------------------------------------------------------------------
@@ -1126,7 +1134,7 @@ bool PrpListPool::init(const Config& cfg, nvm_ctrl_t* ctrl) {
     l2_next_bump_ = 0;
     l2_free_list_.clear();
 
-    std::fprintf(stderr,
+    TUTTI_INFO(
         "[prp_pool] init: L1=%u slots x %u B = %zu KiB (GPU, DMA-mapped, "
         "n_ioaddrs=%zu), L2=%u slots x %u B = %zu KiB (host-pinned)\n",
         l1_capacity_, cfg.slot_bytes, l1_total / 1024,
