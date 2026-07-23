@@ -54,7 +54,7 @@ class  IMemorySubsystem;        // memory/include/memory_subsystem.h
 /// field.  Builders fill it consistently with the batch direction
 /// so a future per-entry kernel will Just Work.
 ///
-/// Sizing: 8 + 4 + 8 + 4 + 8 + 1 + 7(pad) = 40 bytes, naturally aligned.
+/// Sizing: 8 + 4 + 4 + 8 + 4 + 8 + 1 + 3(pad) = 40 bytes, naturally aligned.
 struct NvmeBatchEntry {
     NvmeFileDeviceHandle* const* shards;        ///< GPU-resident shard ptr table,
                                                 ///<   length == num_shards.
@@ -62,6 +62,14 @@ struct NvmeBatchEntry {
                                                 ///<   d_shards_dev for the input
                                                 ///<   tensor's GpuFile.
     uint32_t                     num_shards;    ///< == GpuFileHandle::num_shards.
+    uint32_t                     tensor_size;   ///< Stripe/interleave unit ==
+                                                ///<   GpuFileHandle::tensor_size
+                                                ///<   (== tensor_shape[2]).  The
+                                                ///<   kernel resolves shards via
+                                                ///<   gpu_file_resolve(tensor_size)
+                                                ///<   -- NOT via the sub-IO size,
+                                                ///<   which is smaller whenever a
+                                                ///<   tensor fans out under MDTS.
 
     const AddressDescriptor*     prp_entry;     ///< Points into the IoSliceView's
                                                 ///<   GPU-resident d_ios[] for this
@@ -83,7 +91,7 @@ struct NvmeBatchEntry {
     bool                         is_read;       ///< Reserved for per-entry direction
                                                 ///<   (R8 kernel today reads the
                                                 ///<   batch-uniform parameter).
-    uint8_t                      pad[7];
+    uint8_t                      pad[3];
 };
 
 /// Caller-owned batch view.  Today the batch is uniform-direction

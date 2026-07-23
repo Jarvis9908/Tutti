@@ -8,9 +8,12 @@
  *   submit_{read,write}_one              -- on-GPU submit primitives
  *                                            (nvme_storage_device.cuh)
  *
- * Stripe selection runs on the GPU: the same input tensor's
- * sub-slices land on different shards in one batch via
- * `fd_idx = gpu_blk % num_shards`.
+ * Stripe selection runs on the GPU via block_storage's own
+ * `gpu_file_resolve` (tensor_size granularity): one tensor lands
+ * ENTIRELY on one shard; its MDTS fan-out sub-IOs are contiguous
+ * within that shard (shard_base + prp_idx * sub_io).  Hosting the
+ * shard choice on the GPU is what lets one batch mix tensors from
+ * every shard without exploding the host-side entry count.
  *
  * Virtual-file -> physical-LBA translation runs inside
  * `submit_*_one` (resolve_lba walks the NvmeFile's extent list).
@@ -25,6 +28,9 @@
 // On-GPU submit primitives + NvmeFileDeviceHandle.
 #include "nvme_storage_device.cuh"
 #include "nvme_file_device_handle.h"
+
+// block_storage's authoritative stripe translation (host+device).
+#include "gpu_file_resolve.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -60,19 +66,32 @@ void nvme_batch_xfer_kernel(const NvmeBatchEntry* entries,
         return;
     }
 
-    // (3a) Stripe selection -- legacy lines 1644-1646:
-    //   gpu_blk  = (file_offset / blk_size) + prp_idx
-    //   fd_idx   = gpu_blk % nvme_file.size()
-    //   file_off = (gpu_blk / nvme_file.size()) * blk_size
-    const uint64_t blk_size = e.prp_entry->data_length;
-    if (blk_size == 0) {
-        printf("nvme_batch_xfer_kernel: tid=%u zero blk_size\n", tid);
+    // (3a) Stripe selection -- via block_storage's gpu_file_resolve at
+    // TENSOR_SIZE granularity (R6 invariant).  The previous form used
+    // the sub-IO size (prp_entry->data_length, i.e. MDTS) as the
+    // stripe unit; that is only equivalent when tensor_size == MDTS
+    // (one sub-IO per tensor).  With tensor_size > MDTS the fan-out
+    // sub-IOs were round-robined across shards at sub-IO granularity,
+    // scattering one tensor's pieces onto the WRONG shards and into
+    // wrong shard offsets (resolve_lba failures / cross K/V
+    // corruption).  Correct form: the whole tensor lives on ONE shard;
+    // sub-IOs are contiguous within it.
+    const uint64_t sub_io = e.prp_entry->data_length;
+    if (sub_io == 0) {
+        printf("nvme_batch_xfer_kernel: tid=%u zero sub_io\n", tid);
         return;
     }
-    const uint64_t gpu_blk  = (e.file_offset / blk_size)
-                            + (uint64_t)e.prp_idx;
-    const uint32_t fd_idx   = (uint32_t)(gpu_blk % e.num_shards);
-    const uint64_t file_off = (gpu_blk / e.num_shards) * blk_size;
+    if (e.tensor_size == 0 || (e.file_offset % e.tensor_size) != 0) {
+        printf("nvme_batch_xfer_kernel: tid=%u bad tensor_size=%u "
+               "file_offset=%llu\n", tid, e.tensor_size,
+               (unsigned long long)e.file_offset);
+        return;
+    }
+    uint32_t fd_idx   = 0;
+    uint64_t base_off = 0;
+    gpu_file_resolve(e.tensor_size, e.num_shards, e.file_offset,
+                     &fd_idx, &base_off);
+    const uint64_t file_off = base_off + (uint64_t)e.prp_idx * sub_io;
 
     NvmeFileDeviceHandle* dh = e.shards[fd_idx];
     if (dh == nullptr) {
@@ -88,13 +107,13 @@ void nvme_batch_xfer_kernel(const NvmeBatchEntry* entries,
                          e.prp_entry->prp1,
                          e.prp_entry->prp2,
                          file_off,
-                         blk_size);
+                         sub_io);
     } else {
         submit_write_one(dh,
                          e.prp_entry->prp1,
                          e.prp_entry->prp2,
                          file_off,
-                         blk_size);
+                         sub_io);
     }
 }
 

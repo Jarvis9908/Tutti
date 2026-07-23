@@ -109,6 +109,7 @@ bool build_nvme_batch(IMemorySubsystem*                        mem,
                 NvmeBatchEntry& e = out_entries[k];
                 e.shards      = in.file_handle->d_shards_dev;
                 e.num_shards  = in.file_handle->num_shards;
+                e.tensor_size = in.file_handle->tensor_size;
                 // v.d_ios points to a GPU-resident contiguous
                 // AddressDescriptor[]; computing &v.d_ios[sub] is
                 // address arithmetic only, no host-side dereference.
@@ -116,7 +117,7 @@ bool build_nvme_batch(IMemorySubsystem*                        mem,
                 e.prp_idx     = prp_idx;
                 e.file_offset = in.file_byte_offset;
                 e.is_read     = is_read;
-                for (int p = 0; p < 7; ++p) e.pad[p] = 0;
+                for (int p = 0; p < 3; ++p) e.pad[p] = 0;
 
                 ++k;
                 ++prp_idx;
