@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>组会分享：Tutti — Making SSD-Backed KV Cache Practical for Long-Context LLM Serving</title>
+    <style>
+        /* ========== Reset & Base ========== */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { font-size: 22px; scroll-behavior: smooth; }
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+            background: #f5f7fb;
+            color: #1a1a2e;
+            line-height: 1.6;
+        }
+
+        /* ========== Slide Container ========== */
+        .slide {
+            width: 100%;
+            min-height: 100vh;
+            padding: 2.5rem 5%;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            position: relative;
+            background: #fff;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.04);
+            margin-bottom: 0.5rem;
+        }
+        .slide:nth-child(even) { background: #fafbff; }
+
+        /* ========== Title Slide ========== */
+        .slide-title {
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            color: #fff;
+            text-align: center;
+            justify-content: center;
+            align-items: center;
+        }
+        .slide-title h1 {
+            font-size: 2.6rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            max-width: 1000px;
+            margin: 0 auto 0.6rem;
+            line-height: 1.3;
+        }
+        .slide-title .sub {
+            font-size: 1.05rem;
+            color: #b8c0e0;
+            margin-top: 0.5rem;
+        }
+        .slide-title .meta {
+            font-size: 0.75rem;
+            color: #8890b0;
+            margin-top: 2rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            padding-top: 1.5rem;
+            display: inline-block;
+        }
+        .slide-title .venue {
+            display: inline-block;
+            background: rgba(255,255,255,0.08);
+            padding: 0.3rem 1.2rem;
+            border-radius: 20px;
+            font-size: 0.7rem;
+            color: #aab4d8;
+            margin-top: 1.2rem;
+        }
+
+        /* ========== Section Header ========== */
+        .section {
+            background: linear-gradient(135deg, #1a1a3e, #2d2b55);
+            color: #fff;
+            text-align: center;
+            justify-content: center;
+            min-height: 50vh;
+        }
+        .section h2 {
+            font-size: 2.2rem;
+            font-weight: 600;
+        }
+        .section .number {
+            display: block;
+            font-size: 0.9rem;
+            color: #8a9bd0;
+            margin-bottom: 0.5rem;
+            letter-spacing: 0.15em;
+        }
+
+        /* ========== Content Slide ========== */
+        .slide h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #1a1a3e;
+            margin-bottom: 1rem;
+            padding-bottom: 0.4rem;
+            border-bottom: 3px solid #4a6cf7;
+            display: inline-block;
+        }
+        .slide h3 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #2d3a6e;
+            margin: 0.6rem 0 0.3rem;
+        }
+        .slide h4 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #3a4a8a;
+            margin: 0.5rem 0 0.2rem;
+        }
+        .slide p, .slide li {
+            font-size: 0.75rem;
+            line-height: 1.6;
+        }
+        .slide ul, .slide ol {
+            padding-left: 1.2rem;
+            margin: 0.3rem 0;
+        }
+        .slide li { margin-bottom: 0.1rem; }
+
+        /* ========== Cards / Grids ========== */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.2rem;
+            margin: 0.6rem 0;
+        }
+        .grid-3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 1rem;
+            margin: 0.6rem 0;
+        }
+        .flex-row {
+            display: flex;
+            gap: 1rem;
+            margin: 0.6rem 0;
+            align-items: flex-start;
+        }
+        .flex-row > * { flex: 1; min-width: 0; }
+        .card {
+            background: #f0f3fd;
+            border-radius: 12px;
+            padding: 0.8rem 1.1rem;
+            border-left: 4px solid #4a6cf7;
+            transition: transform 0.15s;
+        }
+        .card:hover { transform: translateY(-2px); }
+        .card.green { border-left-color: #22c55e; background: #f0fdf4; }
+        .card.red   { border-left-color: #ef4444; background: #fef2f2; }
+        .card.amber { border-left-color: #f59e0b; background: #fffbeb; }
+        .card.purple { border-left-color: #8b5cf6; background: #f5f3ff; }
+        .card h4 { margin-top: 0; }
+
+        /* ========== Highlight Box ========== */
+        .highlight {
+            background: #eef2ff;
+            border-radius: 10px;
+            padding: 0.7rem 1.1rem;
+            margin: 0.5rem 0;
+            border: 1px solid #c7d2fe;
+        }
+        .highlight strong { color: #4a6cf7; }
+        .tag {
+            display: inline-block;
+            background: #4a6cf7;
+            color: #fff;
+            font-size: 0.5rem;
+            padding: 0.08rem 0.5rem;
+            border-radius: 6px;
+            margin-right: 0.3rem;
+            vertical-align: middle;
+        }
+        .tag.green { background: #22c55e; }
+        .tag.amber { background: #f59e0b; }
+        .tag.red   { background: #ef4444; }
+
+        /* ========== Data / Stat ========== */
+        .stat-row {
+            display: flex;
+            gap: 1.2rem;
+            justify-content: center;
+            margin: 0.8rem 0;
+            flex-wrap: wrap;
+        }
+        .stat {
+            text-align: center;
+            background: #f0f3fd;
+            border-radius: 12px;
+            padding: 0.6rem 1.2rem;
+            min-width: 100px;
+        }
+        .stat .num {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: #4a6cf7;
+        }
+        .stat .num.green { color: #22c55e; }
+        .stat .num.amber { color: #f59e0b; }
+        .stat .num.red   { color: #ef4444; }
+        .stat .label {
+            font-size: 0.55rem;
+            color: #666;
+        }
+
+        /* ========== Architecture Diagram (ASCII) ========== */
+        .arch {
+            background: #1a1a2e;
+            color: #b8c8e8;
+            font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+            font-size: 0.5rem;
+            line-height: 1.35;
+            padding: 0.8rem;
+            border-radius: 10px;
+            overflow-x: auto;
+            white-space: pre;
+            margin: 0.5rem 0;
+        }
+
+        /* ========== Figure Images ========== */
+        .fig-container {
+            width: 100%;
+            margin: 0.4rem 0;
+            text-align: center;
+        }
+        .fig-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            border: 1px solid #e2e6ef;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        .fig-caption {
+            font-size: 0.58rem;
+            color: #666;
+            margin-top: 0.2rem;
+            font-style: italic;
+        }
+        .fig-row {
+            display: flex;
+            gap: 1rem;
+            margin: 0.4rem 0;
+            align-items: flex-start;
+        }
+        .fig-row .fig-container {
+            flex: 1;
+            min-width: 0;
+        }
+
+        /* ========== Bottom meta ========== */
+        .page-num {
+            position: absolute;
+            bottom: 0.8rem;
+            right: 2.5rem;
+            font-size: 0.5rem;
+            color: #aaa;
+        }
+
+        /* ========== Table ========== */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.65rem;
+            margin: 0.5rem 0;
+        }
+        th, td {
+            padding: 0.35rem 0.7rem;
+            border: 1px solid #dde2ed;
+            text-align: center;
+        }
+        th { background: #eef2ff; font-weight: 600; }
+        tr:nth-child(even) td { background: #f8f9ff; }
+
+        /* ========== Responsive ========== */
+        @media (max-width: 800px) {
+            html { font-size: 16px; }
+            .slide { padding: 1.5rem 1.2rem; }
+            .grid-2, .grid-3 { grid-template-columns: 1fr; }
+            .flex-row { flex-direction: column; }
+            .fig-row { flex-direction: column; }
+            .slide-title h1 { font-size: 1.8rem; }
+        }
+
+        /* ========== Animations ========== */
+        .fade-in { animation: fadeIn 0.4s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+        .small { font-size: 0.6rem; color: #777; }
+    </style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- Slide 1: Title -->
+<!-- ============================================================ -->
+<div class="slide slide-title">
+    <div class="fade-in">
+        <h1>Tutti: Making SSD-Backed KV Cache<br>Practical for Long-Context LLM Serving</h1>
+        <div class="sub">Shi Qiu, Yifan Hu, Xintao Wang, Wenhao Zhu, Jianqin Yan, Hao Chen, Kaiqiang Xu, Kai Chen, Yiming Zhang</div>
+        <div class="venue">arXiv:2605.03375v1 · May 2026</div>
+        <div class="meta">厦门大学 · 上海交通大学 · 香港科技大学</div>
+    </div>
+    <div class="page-num">1 / 16</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Slide 2: TOC -->
+<!-- ============================================================ -->
+<div class="slide">
+    <h2>📋 提纲</h2>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.8rem;">
+        <div class="card purple"><h4>1. 背景与动机</h4>
+            <p class="small">长上下文LLM推理中的KV Cache问题 · 三级存储层次 · CPU瓶颈</p>
+        </div>
+        <div class="card purple"><h4>2. 问题分析</h4>
+            <p class="small">SSD-backed KV Cache的I/O瓶颈 · GPU Direct Storage的局限性</p>
+        </div>
+        <div class="card green"><h4>3. 核心设计</h4>
+            <p class="small">GPU-centric对象存储 · GPU io_uring · Slack-Aware调度</p>
+        </div>
+        <div class="card green"><h4>4. 实验评估</h4>
+            <p class="small">端到端性能 · 消融实验 · 成本分析</p>
+        </div>
+        <div class="card amber"><h4>5. 总结与思考</h4>
+            <p class="small">贡献总结 · 启发 · 与代码仓库的关联</p>
+        </div>
+    </div>
+    <div class="page-num">2 / 16</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Section: 背景与动机 -->
+<!-- ============================================================ -->
+<div class="slide section">
+    <span class="number">PART 1</span>
+    <h2>背景与动机</h2>
+    <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Background & Motivation</div>
+    <div class="page-num">3 / 16</div>
+</div>
+
+<!-- Slide 3: LLM推理与KV Cache -->
+<div class="slide">
+    <h2>LLM推理与KV Cache</h2>
+    <div class="grid-2">
+        <div>
+            <h3>Prefill & Decode 两阶段</h3>
+            <ul>
+                <li><strong>Prefill</strong>：处理输入prompt，计算K/V矩阵，compute-bound</li>
+                <li><strong>Decode</strong>：自回归逐token生成，每次使用之前计算的KV</li>
+            </ul>
+            <h3>KV Cache = 用存储换计算</h3>
+            <ul>
+                <li>缓存 <strong>Key</strong> 和 <strong>Value</strong> 矩阵，避免 decode 阶段重算</li>
+                <li>Prefix Caching：跨请求复用共享前缀的 KV Cache</li>
+                <li>可降低每 token 成本 <strong>高达 90%</strong></li>
+            </ul>
+        </div>
+        <div>
+            <h3>Paged KV 内存管理</h3>
+            <ul>
+                <li>vLLM / SGLang 使用 <strong>分页 (paged)</strong> 布局管理 KV Cache</li>
+                <li>Block 大小通常 16–64 tokens，按需分配</li>
+                <li>灵活但导致 <strong>非连续</strong> 的碎片化内存布局</li>
+            </ul>
+            <div class="highlight" style="margin-top: 0.5rem;">
+                <strong>核心矛盾：</strong><br>
+                长上下文 → KV Cache 巨大 → HBM 装不下 → 需要卸载到 DRAM / SSD
+            </div>
+        </div>
+    </div>
+    <div class="page-num">3 / 16</div>
+</div>
+
+<!-- Slide 4: 三级存储瓶颈 -->
+<div class="slide">
+    <h2>三级存储层次及其瓶颈</h2>
+    <table>
+        <tr><th>层级</th><th>容量</th><th>带宽</th><th>延迟</th><th>瓶颈</th></tr>
+        <tr><td>HBM</td><td>~80 GB</td><td>~3.35 TB/s</td><td>~0.1 μs</td><td>容量极小</td></tr>
+        <tr><td>DRAM</td><td>~2 TB</td><td>~50 GB/s</td><td>~0.1 μs</td><td>长上下文仍不够</td></tr>
+        <tr><td>NVMe SSD</td><td>&gt;100 TB</td><td>~29 GB/s</td><td>~10 μs</td><td>I/O瓶颈严重</td></tr>
+    </table>
+    <div class="grid-2" style="margin-top: 0.3rem;">
+        <div class="card green">
+            <h4>DRAM 层次 ✅</h4>
+            <p class="small">低延迟、支持随机访问，通过 layer-wise pipelining 可有效隐藏数据传输延迟，接近 HBM 性能。</p>
+        </div>
+        <div class="card red">
+            <h4>SSD 层次 ❌</h4>
+            <p class="small">尽管有 GPU Direct Storage (GDS)，GPU 空闲时间仍占 <strong>70–80%</strong>，甚至慢于重计算。</p>
+        </div>
+    </div>
+    <div class="page-num">4 / 16</div>
+</div>
+
+<!-- Slide 5: GDS的局限性 + Figure 2 -->
+<div class="slide">
+    <h2>GDS 为什么不够？</h2>
+    <div class="grid-2">
+        <div>
+            <h3>CPU 仍然在关键路径上</h3>
+            <ul>
+                <li>GDS 移除了 CPU 数据路径（零拷贝），但 <strong>每个 I/O 仍需 CPU 发起</strong></li>
+                <li>分页布局 → 大量小尺寸随机 I/O → CPU 成为瓶颈</li>
+                <li>CPU 在控制路径上做 <strong>O(L·N)</strong> 工作</li>
+            </ul>
+            <h3>I/O 碎片化严重</h3>
+            <ul>
+                <li>Qwen3-32B，64-block，128K tokens → 约 <strong>256K</strong> 个分散的 80KB 对象</li>
+                <li>vs DRAM：<code>cudaMemcpyAsync</code> 可合并 → 少量 GPU kernel</li>
+                <li>vs SSD：大量随机小 I/O → 带宽利用率极低</li>
+            </ul>
+        </div>
+        <div>
+            <h3>Figure 2: SSD 导致严重 GPU Bubble</h3>
+            <div class="fig-container">
+                <img src="arxiv_fig2.png" alt="Figure 2: Inference performance comparison">
+                <div class="fig-caption">Figure 2: vLLM with LMCache on Llama3-8B, 64K seq, 75% hit. SSD/GDS 的 GPU bubble 超过 70%，
+                vLLM v0.17.0 下 SSD 甚至慢于 HBM 重计算（虚线）。</div>
+            </div>
+        </div>
+    </div>
+    <div class="page-num">5 / 16</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Section: 核心设计 -->
+<!-- ============================================================ -->
+<div class="slide section">
+    <span class="number">PART 2</span>
+    <h2>核心设计</h2>
+    <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Tutti: GPU-Centric KV Cache Object Store</div>
+    <div class="page-num">6 / 16</div>
+</div>
+
+<!-- Slide 6: Design Overview + Figure 1 -->
+<div class="slide">
+    <h2>设计总览：GPU-Centric 架构</h2>
+    <div class="fig-container">
+        <img src="arxiv_fig1.png" alt="Figure 1: CPU-Centric vs GPU-Centric architecture" style="max-width:85%;">
+        <div class="fig-caption">Figure 1: CPU-Centric (LMCache w/ and w/o GDS) vs GPU-Centric (Tutti)。Tutti 将 CPU
+        从关键数据路径和 I/O 控制路径中完全移除。</div>
+    </div>
+    <div class="highlight">
+        <strong>核心理念：</strong> 将 CPU 从关键数据路径和控制路径中 <strong>完全移除</strong>，让 GPU 自己管理 I/O。
+        CPU 仅负责异步加载 I/O kernel（每层一次，O(L)），不再是瓶颈。
+    </div>
+    <h3>三大关键技术</h3>
+    <div class="grid-3">
+        <div class="card green"><h4>① GPU 原生对象存储</h4><p class="small">GPU File Pool + P2P Mapping Table，对齐 KV Cache 语义，SGL 代替 PRP 减少 HBM 开销</p></div>
+        <div class="card green"><h4>② GPU io_uring</h4><p class="small">零拷贝 ring buffer，GPU 侧异步 I/O 提交/完成，SM 分区隔离</p></div>
+        <div class="card green"><h4>③ Slack-Aware 调度</h4><p class="small">离线 profile 窗口 + 读写分离调度，避免带宽冲突和 SM 争抢</p></div>
+    </div>
+    <div class="page-num">6 / 16</div>
+</div>
+
+<!-- Slide 7: Object Store + Figure 3 & 4 -->
+<div class="slide">
+    <h2>① GPU-Centric 对象存储</h2>
+    <div class="grid-2">
+        <div>
+            <h3>GPU File Pool & P2P Mapping</h3>
+            <ul>
+                <li>每个 memory block → 一个 object（K 对象 + V 对象）</li>
+                <li>GPU file = 2 × L 个 object</li>
+                <li>Tensor-Stripe 布局：按 tensor 粒度 striped</li>
+                <li>预分配 NVMe file pool，启动时完成</li>
+                <li>P2P 映射表：虚拟地址 → PCI 物理地址，启动时预计算</li>
+                <li><span class="tag">关键优化</span> <strong>SGL 代替 PRP</strong>：HBM 开销 3.75GB → 15MB</li>
+            </ul>
+        </div>
+        <div>
+            <h3>Figure 3: GPU Hash Performance</h3>
+            <div class="fig-container">
+                <img src="arxiv_fig3.png" alt="Figure 3: CPU vs GPU hash performance">
+                <div class="fig-caption">GPU hash 比 CPU 慢 9×–51×。Tutti 解法：CPU 管理元数据（off critical path），GPU 只持有 I/O 轻量元数据。</div>
+            </div>
+        </div>
+    </div>
+    <div class="fig-container">
+        <img src="arxiv_fig4.png" alt="Figure 4: GPU-centric KV cache store layout" style="max-width:75%;">
+        <div class="fig-caption">Figure 4: GPU-centric KV Cache Store 整体架构</div>
+    </div>
+    <div class="page-num">7 / 16</div>
+</div>
+
+<!-- Slide 8: SGL优化 + Figure 10 -->
+<div class="slide">
+    <h2>SGL 优化：消除 PRP 内存与带宽瓶颈</h2>
+    <div class="grid-2">
+        <div>
+            <h3>PRP 的两个问题</h3>
+            <div class="card red">
+                <h4>① HBM 浪费</h4>
+                <p class="small">60 GB KV Cache → PRP 需要 <strong>3.75 GB</strong> HBM 用于地址映射</p>
+            </div>
+            <div class="card red">
+                <h4>② PCIe 通信开销大</h4>
+                <p class="small">PRP 命令需要大量 descriptor，单线程读写带宽极低</p>
+            </div>
+            <h3>SGL (Scatter Gather List)</h3>
+            <ul>
+                <li>每个条目仅 <strong>16 bytes</strong>（物理地址 8B + 长度 4B + ID 4B）</li>
+                <li>HBM 开销：仅 <strong>15 MB</strong>（↓ 256×）</li>
+                <li>减少 PCIe 通信开销，稳定队列进度</li>
+            </ul>
+        </div>
+        <div>
+            <div class="fig-container">
+                <img src="arxiv_fig10.png" alt="Figure 10: PRP vs SGL bandwidth benchmark">
+                <div class="fig-caption">Figure 10: PRP vs SGL 单线程读写微基准测试。</div>
+            </div>
+            <div class="stat-row">
+                <div class="stat"><div class="num green">31×</div><div class="label">Read 加速</div></div>
+                <div class="stat"><div class="num green">91×</div><div class="label">Write 加速</div></div>
+            </div>
+        </div>
+    </div>
+    <div class="page-num">8 / 16</div>
+</div>
+
+<!-- Slide 9: GPU io_uring + Figure 5 -->
+<div class="slide">
+    <h2>② GPU io_uring (gio_uring)</h2>
+    <div class="grid-2">
+        <div>
+            <h3>设计思想</h3>
+            <ul>
+                <li>模拟 CPU-side <code>io_uring</code>，<strong>完全在 GPU 侧</strong>运作</li>
+                <li>"CPU-prepared, GPU-executed" 模型</li>
+                <li>CPU 预填充 IOCB，GPU 执行时零 CPU 干预</li>
+            </ul>
+            <h3>关键组件</h3>
+            <ul>
+                <li><strong>Zero-Copy Ring Buffer</strong>：SQ/CQ 驻留 GPU HBM，CPU 通过 non-cached mmap 写入</li>
+                <li><strong>IOCB/IOCTX</strong>：每个 IOCB 含 2048 个 IOCTX，匹配 SM/warp 粒度</li>
+                <li><strong>SM Partitioning</strong>：通过 Green Context 隔离 I/O 和 Compute domain</li>
+            </ul>
+            <h3>I/O 流程</h3>
+            <ol class="small">
+                <li>CPU: init_queue(depth) → 创建 SQ/CQ</li>
+                <li>CPU: get_iocb(nums,event) → 填充 IOCTX（CUDA event 保证依赖）</li>
+                <li>CPU: issue_io(IOCB_ids,SMs) → 启动 GPU kernel；GPU 生成并提交 NVMe 命令</li>
+                <li>GPU: wait_cqe() → 轮询 CQ 完成，无需 CPU 参与</li>
+            </ol>
+        </div>
+        <div>
+            <div class="fig-container">
+                <img src="arxiv_fig5.png" alt="Figure 5: GPU io_uring architecture">
+                <div class="fig-caption">Figure 5: GPU io_uring 架构与 I/O 处理流程。GPU 可一次发起数千并行 I/O 请求。</div>
+            </div>
+        </div>
+    </div>
+    <div class="page-num">9 / 16</div>
+</div>
+
+<!-- Slide 10: Slack-Aware Scheduling + Figure 6 & 7 -->
+<div class="slide">
+    <h2>③ Slack-Aware I/O 调度</h2>
+    <div class="grid-2">
+        <div>
+            <h3>两大干扰问题</h3>
+            <div class="card red">
+                <h4>读写带宽冲突</h4>
+                <p class="small">并发 R/W 总带宽 <strong>下降 60%</strong>（NVMe 内部缓存竞争）</p>
+            </div>
+            <div class="card red">
+                <h4>SM 资源竞争</h4>
+                <p class="small">长 I/O kernel 阻塞 compute kernel（非抢占式调度）</p>
+            </div>
+            <h3>调度策略</h3>
+            <ul>
+                <li><strong>离线 Profiling</strong>：按 (input_len, prefix_len) 索引 slack window</li>
+                <li><strong>Read 优先</strong>：preload 阶段 Read 在关键路径上</li>
+                <li><strong>Write 延迟</strong>：仅在 slack window 内发 write，否则 defer</li>
+                <li><strong>Decoupled R/W</strong>：避免 layer-wise 流水线的 R/W 并发</li>
+            </ul>
+        </div>
+        <div>
+            <div class="fig-container">
+                <img src="arxiv_fig6.png" alt="Figure 6: Concurrent vs Decoupled R/W bandwidth">
+                <div class="fig-caption">Figure 6: 并发 R/W 导致带宽降 60%，Tutti 将 R/W 解耦。</div>
+            </div>
+            <div class="fig-container" style="margin-top:0.3rem;">
+                <img src="arxiv_fig7.png" alt="Figure 7: Slack-aware I/O scheduler" style="max-width:80%;">
+                <div class="fig-caption">Figure 7: Slack-Aware I/O Scheduler 概览。Crossover Point 达到 98.3%。</div>
+            </div>
+        </div>
+    </div>
+    <div class="page-num">10 / 16</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Section: 实验评估 -->
+<!-- ============================================================ -->
+<div class="slide section">
+    <span class="number">PART 3</span>
+    <h2>实验评估</h2>
+    <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Evaluation</div>
+    <div class="page-num">11 / 16</div>
+</div>
+
+<!-- Slide 11: 实验配置 + Table 1 -->
+<div class="slide">
+    <h2>实验设置</h2>
+    <div class="grid-3">
+        <div>
+            <h3>硬件</h3>
+            <ul class="small">
+                <li>CPU: Intel Xeon 6530 (64核)</li>
+                <li>GPU: 2× H100 80GB HBM</li>
+                <li>SSD: 4× Solidigm D7-PS1010 7.68TB</li>
+                <li>NVMe 峰值: 读 29 GB/s / 写 12 GB/s</li>
+            </ul>
+        </div>
+        <div>
+            <h3>模型 & Workload</h3>
+            <ul class="small">
+                <li>Llama3-8B (单 GPU)</li>
+                <li>GLM-4-9B-Chat-1M (双 GPU TP)</li>
+                <li>LEval (3K–200K tokens)</li>
+                <li>LooGLE (&gt;100K tokens)</li>
+            </ul>
+        </div>
+        <div>
+            <h3>Baselines</h3>
+            <ul class="small">
+                <li>HBM: vLLM 纯 HBM</li>
+                <li>DRAM: LMCache-DRAM-LW</li>
+                <li>SSD: LMCache-SSD</li>
+                <li>GDS: LMCache-GDS</li>
+                <li>Tutti: 本文方法</li>
+            </ul>
+        </div>
+    </div>
+    <h3>Cache Hit Rates（SSD 优势显著）</h3>
+    <table>
+        <tr><th>层级</th><th>容量</th><th>LEval</th><th>LooGLE</th></tr>
+        <tr><td>HBM</td><td>80 GB</td><td>8%</td><td>4%</td></tr>
+        <tr><td>DRAM</td><td>256 GB</td><td>53%</td><td>24%</td></tr>
+        <tr><td style="font-weight:600;">SSD (Tutti)</td><td style="font-weight:600;">14 TB</td><td style="font-weight:600;color:#22c55e;">84%</td><td style="font-weight:600;color:#22c55e;">86%</td></tr>
+    </table>
+    <div class="page-num">11 / 16</div>
+</div>
+
+<!-- Slide 12: 端到端性能 + Figure 8 & 9 -->
+<div class="slide">
+    <h2>端到端性能</h2>
+    <div class="stat-row">
+        <div class="stat"><div class="num">78.3%</div><div class="label">TTFT 降低 (vs GDS)</div></div>
+        <div class="stat"><div class="num">2×</div><div class="label">有效请求率提升</div></div>
+        <div class="stat"><div class="num">27%</div><div class="label">服务成本降低</div></div>
+        <div class="stat"><div class="num green">98.3%</div><div class="label">Crossover Point</div></div>
+    </div>
+    <div class="fig-container">
+        <img src="arxiv_fig8.png" alt="Figure 8: End-to-end TTFT and ITL comparison">
+        <div class="fig-caption">Figure 8: 端到端 TTFT 和 ITL 对比（Llama3-8B，LEval & LooGLE，vLLM v0.12.0 vs v0.17.0）。
+        Tutti 在所有负载下保持最低且最稳定的延迟曲线。</div>
+    </div>
+    <div class="fig-container">
+        <img src="arxiv_fig9.png" alt="Figure 9: Raw bandwidth of retrieve and store" style="max-width:70%;">
+        <div class="fig-caption">Figure 9: Retrieve/Store 原始带宽对比。Tutti Retrieve 达 25.9 GB/s（2.08× GDS），Store 稳定 ~10 GB/s。</div>
+    </div>
+    <div class="page-num">12 / 16</div>
+</div>
+
+<!-- Slide 13: 更多实验数据 + Figure 11, 12, 13, 14 -->
+<div class="slide">
+    <h2>消融实验与扩展分析</h2>
+    <div class="fig-row">
+        <div class="fig-container">
+            <img src="arxiv_fig11.png" alt="Figure 11: TTFT across prefix lengths">
+            <div class="fig-caption">Figure 11: TTFT vs Prefix Length。Tutti 在 112K prefix 下比 GDS 低 61.4%。</div>
+        </div>
+        <div class="fig-container">
+            <img src="arxiv_fig12.png" alt="Figure 12: Distributed scalability">
+            <div class="fig-caption">Figure 12: 2-GPU 分布式扩展。GDS 在 512K/640K OOM，Tutti 640K 仅 1.2s。</div>
+        </div>
+    </div>
+    <div class="fig-row">
+        <div class="fig-container">
+            <img src="arxiv_fig13.png" alt="Figure 13: Latency decomposition">
+            <div class="fig-caption">Figure 13: 延迟分解。Tutti 将 Crossover Point 推至 98.3%，bubble 时间几乎为零。</div>
+        </div>
+        <div class="fig-container">
+            <img src="arxiv_fig14.png" alt="Figure 14: Inference cost">
+            <div class="fig-caption">Figure 14: 每百万 token 推理成本。Tutti 比 GDS 降低 27%，比 SSD 降低 66%。</div>
+        </div>
+    </div>
+    <div class="page-num">13 / 16</div>
+</div>
+
+<!-- Slide 14: 更多实验文字总结 -->
+<div class="slide">
+    <h2>更多实验结果小结</h2>
+    <div class="grid-2">
+        <div class="card amber">
+            <h4>分布式扩展性</h4>
+            <ul class="small">
+                <li>GLM-4-9B-1M, 2GPU, 4-Disk</li>
+                <li>LMCache-GDS 在 512K/640K prefix 时 <strong>OOM 失败</strong></li>
+                <li>Tutti 无需 staging buffer，640K 仅 <strong>1.2s</strong></li>
+                <li>原因：GDS 的 cufile 需要额外 staging buffer 显存</li>
+            </ul>
+        </div>
+        <div class="card purple">
+            <h4>Layerwise Async Pipelining</h4>
+            <ul class="small">
+                <li>Tutti 将 crossover point 从 ~50% 推到 <strong>98.3%</strong></li>
+                <li>几乎全范围 compute-bound</li>
+                <li>bubble time 平均仅 25ms（93.75% hit 时仅 6ms）</li>
+            </ul>
+        </div>
+        <div class="card green">
+            <h4>经济成本分析</h4>
+            <ul class="small">
+                <li>SSD 成本 ≈ DRAM 的 <strong>1/100</strong></li>
+                <li>Tutti 比 LMCache-SSD 降低 <strong>66.2%</strong></li>
+                <li>Tutti 比 LMCache-GDS 降低 <strong>~27%</strong></li>
+                <li>接近纯 DRAM 性能，容量近乎无限</li>
+            </ul>
+        </div>
+        <div class="card red">
+            <h4>多 GPU NVMe 共享</h4>
+            <ul class="small">
+                <li>每个 GPU 独立 Queue Pair，无竞争</li>
+                <li>32 队列/GPU（SSD 支持 256 队列）</li>
+                <li>所有 GPU 可并行访问本地 NVMe</li>
+            </ul>
+        </div>
+    </div>
+    <div class="page-num">14 / 16</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Section: 总结与思考 -->
+<!-- ============================================================ -->
+<div class="slide section">
+    <span class="number">PART 4</span>
+    <h2>总结与思考</h2>
+    <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Conclusion & Discussion</div>
+    <div class="page-num">15 / 16</div>
+</div>
+
+<!-- Slide 15: Conclusion -->
+<div class="slide">
+    <h2>总结</h2>
+    <div class="grid-2">
+        <div>
+            <h3>核心贡献</h3>
+            <ol>
+                <li><strong>首个开源</strong> 消除 CPU 干预的 SSD-backed KV Cache 方案</li>
+                <li><strong>GPU-native 对象抽象</strong>：桥接 KV Cache 传输粒度与 GPU 存储 I/O</li>
+                <li><strong>GPU io_uring</strong>：异步 GPU 直接对象 I/O</li>
+                <li><strong>Slack-Aware 调度</strong>：避免 GPU 资源争抢，Crossover Point 达 98.3%</li>
+                <li>集成 vLLM，实现 <strong>DRAM 级性能 + SSD 级容量</strong></li>
+            </ol>
+            <h3>个人思考</h3>
+            <ul>
+                <li>BaM/GeminiFS 的 GPU-centric 思路在 LLM 推理场景的优秀落地</li>
+                <li>"CPU 准备，GPU 执行" 模式在 LLM pipeline 中非常优雅</li>
+                <li>离线 Profile + 查表调度方案在实践中可行且高效</li>
+                <li>SGL 替代 PRP 优化看似小改动，但收益巨大（31×/91×）</li>
+            </ul>
+        </div>
+        <div>
+            <h3>未来工作 & 待改进</h3>
+            <ul>
+                <li><strong>远程路径优化</strong>：当前远端经 CPU 中转 + RDMA，计划 GPU 发起 RDMA</li>
+                <li><strong>Mooncake 集成</strong>：跨节点 KV Cache 共享（本地 Tutti + 全局 Mooncake）</li>
+                <li><strong>局限性</strong>：
+                    <ul>
+                        <li>SM Partitioning 依赖 NVIDIA Green Context 硬件特性</li>
+                        <li>离线 Profile 在模型/硬件变化时需重新生成</li>
+                        <li>大规模集群可靠性有待验证</li>
+                    </ul>
+                </li>
+            </ul>
+            <h3>与代码仓库的关联</h3>
+            <div class="highlight">
+                <strong>E:\code\Tutti</strong> 就是该论文的官方实现仓库！<br>
+                包含 block_storage、io_engine、batch kernel 等核心模块，<br>
+                以及在 vLLM 中的 KVConnector 集成代码。
+            </div>
+        </div>
+    </div>
+    <div class="page-num">15 / 16</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Final slide -->
+<!-- ============================================================ -->
+<div class="slide slide-title" style="background: linear-gradient(135deg, #1a1a2e, #16213e);">
+    <div class="fade-in">
+        <h1 style="font-size: 2rem;">谢谢！欢迎讨论 🙌</h1>
+        <div class="sub">Paper: arXiv:2605.03375v1</div>
+        <div class="meta">Code: github.com/your-org/Tutti（开源）</div>
+    </div>
+    <div class="page-num">End</div>
+</div>
+
+</body>
+</html>
