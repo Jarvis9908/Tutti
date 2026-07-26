@@ -648,89 +648,229 @@
 
 <!-- Slide 12: 端到端性能 + Figure 8 & 9 -->
 <div class="slide">
-    <h2>端到端性能</h2>
+    <h2>端到端性能总览</h2>
     <div class="stat-row">
         <div class="stat"><div class="num">78.3%</div><div class="label">TTFT 降低 (vs GDS)</div></div>
         <div class="stat"><div class="num">2×</div><div class="label">有效请求率提升</div></div>
         <div class="stat"><div class="num">27%</div><div class="label">服务成本降低</div></div>
         <div class="stat"><div class="num green">98.3%</div><div class="label">Crossover Point</div></div>
     </div>
-    <div class="fig-container">
-        <img src="arxiv_fig8.png" alt="Figure 8: End-to-end TTFT and ITL comparison">
-        <div class="fig-caption">Figure 8: 端到端 TTFT 和 ITL 对比（Llama3-8B，LEval & LooGLE，vLLM v0.12.0 vs v0.17.0）。
-        Tutti 在所有负载下保持最低且最稳定的延迟曲线。</div>
+
+    <h3 style="margin-top:0.2rem;">Figure 8: TTFT（首 token 延迟）与 ITL（token 间延迟）综合对比</h3>
+    <div class="flex-row">
+        <div class="fig-container" style="flex:1.3;">
+            <img src="arxiv_fig8.png" alt="Figure 8: End-to-end TTFT and ITL comparison">
+        </div>
+        <div style="flex:1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 图表解读</h4>
+                <p class="small">本图展示了在不同请求率（RPS）下，4种方案在 LEval 和 LooGLE 两个长上下文 benchmark 上的 TTFT 和 ITL。横轴为请求率，纵轴为延迟。包含 vLLM v0.12.0（旧版）和 v0.17.0（新版，计算优化更强）两组对比。</p>
+            </div>
+            <div class="card green" style="margin-top:0.3rem;">
+                <h4>✅ Tutti 核心优势</h4>
+                <ul class="small">
+                    <li><strong>TTFT 最优</strong>：LEval 新版下，Tutti 比 GDS 低 <strong>78.3%</strong>（高负载），比 DRAM 低 <strong>69.1%</strong></li>
+                    <li><strong>曲线最平稳</strong>：Tutti 随负载增长延迟上升最慢，而 HBM/SSD 在低负载下就已急剧上升</li>
+                    <li><strong>1s SLO 约束下</strong>：有效请求率比 GDS 高 <strong>100%</strong>，比 DRAM 高 <strong>50%</strong></li>
+                    <li><strong>ITL 同样领先</strong>：LEval 新版 1.5 RPS 下，Tutti 比 DRAM 低 22.0%，比 GDS 低 24.4%</li>
+                </ul>
+            </div>
+            <div class="card amber" style="margin-top:0.3rem;">
+                <h4>⚠️ 关键观察</h4>
+                <ul class="small">
+                    <li><strong>HBM 纯缓存</strong>：容量小（80GB），hit rate 仅 8-4%，大量触发重计算，TTFT 极高</li>
+                    <li><strong>SSD/GDS</strong>：即使使用 GDS，GPU 空闲 >70%，TTFT 甚至高于 HBM 重计算（虚线）</li>
+                    <li><strong>vLLM v0.17.0</strong>：计算优化更强，但 GDS/SSD 的 I/O 瓶颈反而更加突出</li>
+                    <li><strong>LooGLE（超长上下文）</strong>：所有 baseline 性能差距更大，Tutti 优势更显著</li>
+                </ul>
+            </div>
+        </div>
     </div>
-    <div class="fig-container">
-        <img src="arxiv_fig9.png" alt="Figure 9: Raw bandwidth of retrieve and store" style="max-width:70%;">
-        <div class="fig-caption">Figure 9: Retrieve/Store 原始带宽对比。Tutti Retrieve 达 25.9 GB/s（2.08× GDS），Store 稳定 ~10 GB/s。</div>
+
+    <h3 style="margin-top:0.3rem;">Figure 9: Retrieve/Store 原始带宽对比</h3>
+    <div class="flex-row">
+        <div class="fig-container" style="flex:1;">
+            <img src="arxiv_fig9.png" alt="Figure 9: Raw bandwidth of retrieve and store" style="max-width:95%;">
+        </div>
+        <div style="flex:1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 图表解读</h4>
+                <p class="small">本图为存储子系统微基准测试，绕过模型执行，直接测试 Retrieve（读取）和 Store（写入）的原始带宽。横轴为上下文长度（tokens），纵轴为带宽（GB/s）。</p>
+            </div>
+            <div class="card green" style="margin-top:0.3rem;">
+                <h4>✅ Retrieve 带宽（图a）</h4>
+                <ul class="small">
+                    <li><strong>Tutti 达 25.9 GB/s</strong>，近线性扩展，几乎饱和 SSD 带宽</li>
+                    <li><strong>LMCache-DRAM 不稳定</strong>：16K 处跌至 8.5 GB/s（内存碎片导致）</li>
+                    <li><strong>LMCache-GDS 饱和</strong>：仅 ~11.9 GB/s，即使有 2 块 SSD</li>
+                    <li><strong>Tutti 优势：2.08× over GDS</strong></li>
+                </ul>
+            </div>
+            <div class="card amber" style="margin-top:0.3rem;">
+                <h4>✅ Store 带宽（图b）</h4>
+                <ul class="small">
+                    <li>DRAM 最高（~18.4 GB/s）但无持久化、容量有限</li>
+                    <li>Tutti 稳定 ~10 GB/s（受 SSD 峰值限制），GDS 仅 ~7 GB/s</li>
+                    <li>论文指出 Store 带宽对端到端推理性能影响较小，10 GB/s 已足够</li>
+                </ul>
+            </div>
+        </div>
     </div>
     <div class="page-num">12 / 16</div>
 </div>
 
-<!-- Slide 13: 更多实验数据 + Figure 11, 12, 13, 14 -->
+<!-- Slide 13: 消融实验与扩展分析 + Figure 11-14 -->
 <div class="slide">
     <h2>消融实验与扩展分析</h2>
-    <div class="fig-row">
-        <div class="fig-container">
+    <p class="small" style="margin-bottom:0.3rem;color:#666;">论文通过多组消融实验验证各设计组件的贡献：TTFT vs. 前缀复用、PRP vs. SGL、分布式扩展、延迟分解与成本分析</p>
+
+    <!-- Figure 11: TTFT across prefix lengths -->
+    <h3>Figure 11: 不同前缀复用率下的 TTFT 对比</h3>
+    <div class="flex-row" style="margin-bottom:0.4rem;">
+        <div class="fig-container" style="flex:1;">
             <img src="arxiv_fig11.png" alt="Figure 11: TTFT across prefix lengths">
-            <div class="fig-caption">Figure 11: TTFT vs Prefix Length。Tutti 在 112K prefix 下比 GDS 低 61.4%。</div>
         </div>
-        <div class="fig-container">
-            <img src="arxiv_fig12.png" alt="Figure 12: Distributed scalability">
-            <div class="fig-caption">Figure 12: 2-GPU 分布式扩展。GDS 在 512K/640K OOM，Tutti 640K 仅 1.2s。</div>
+        <div style="flex:1.1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 实验设置</h4>
+                <p class="small">固定输入总长度 = 128K tokens，逐步增加缓存前缀长度（16K → 128K），观察 TTFT 变化。前缀越长 → 需要从存储读取的 KV 数据越多 → I/O 负载越大。</p>
+            </div>
+            <div class="card green" style="margin-top:0.3rem;">
+                <h4>✅ 核心发现</h4>
+                <ul class="small">
+                    <li><strong>112K prefix 下</strong>：Tutti TTFT = 3.43s，比 LMCache-SSD（7.84s）快 <strong>2.28×</strong></li>
+                    <li><strong>vs GDS</strong>：Tutti 在所有前缀长度下保持优势，16K 领先 5.8%，128K 领先 <strong>61.4%</strong></li>
+                    <li><strong>vs DRAM</strong>：中低复用（16K-96K）Tutti 甚至 <strong>持平或超越 DRAM</strong>（↑13.4%），说明 I/O-compute 重叠效果可以抵消 DRAM 的延迟优势</li>
+                    <li>仅极端高复用（&gt;96K）时 DRAM 因纯 retrieval-bound 而反超（Tutti 落后 ≤20.6%）</li>
+                </ul>
+            </div>
+            <div class="card amber" style="margin-top:0.3rem;">
+                <h4>💡 解读</h4>
+                <p class="small">Tutti 的 I/O-compute 重叠效果极佳，使得 SSD 在大多数场景下接近甚至超越 DRAM 的感知性能。曲线平缓上升而非陡峭，证明带宽利用率高、I/O 调度有效。</p>
+            </div>
         </div>
     </div>
-    <div class="fig-row">
-        <div class="fig-container">
-            <img src="arxiv_fig13.png" alt="Figure 13: Latency decomposition">
-            <div class="fig-caption">Figure 13: 延迟分解。Tutti 将 Crossover Point 推至 98.3%，bubble 时间几乎为零。</div>
+
+    <!-- Figure 12: Distributed scalability -->
+    <h3>Figure 12: 分布式扩展性（2-GPU, 4-Disk）</h3>
+    <div class="flex-row" style="margin-bottom:0.4rem;">
+        <div class="fig-container" style="flex:1;">
+            <img src="arxiv_fig12.png" alt="Figure 12: Distributed scalability">
         </div>
-        <div class="fig-container">
+        <div style="flex:1.1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 实验设置</h4>
+                <p class="small">GLM-4-9B-Chat-1M 模型，2 张 H100（NVLink 互联），4 块 SSD。横轴为前缀长度（128K → 640K），纵轴为 TTFT（对数坐标）。</p>
+            </div>
+            <div class="card red" style="margin-top:0.3rem;">
+                <h4>❌ GDS 在长上下文下 OOM 失效</h4>
+                <ul class="small">
+                    <li><strong>LMCache-GDS 在 512K 和 640K 标记为 N/A</strong>（无法完成测试）</li>
+                    <li>根本原因：GDS 的 <code>cufile</code> 需要分配 GPU 显存作为 <strong>staging buffer</strong>，长上下文下 staging buffer 超出可用 HBM，触发 OOM</li>
+                </ul>
+            </div>
+            <div class="card green" style="margin-top:0.3rem;">
+                <h4>✅ Tutti 无 staging buffer 开销</h4>
+                <ul class="small">
+                    <li>Tutti 通过 register 接口直接管理 GPU 内存，<strong>无需中间 staging buffer</strong></li>
+                    <li>640K prefix 下 TTFT 仅 <strong>1.2s</strong>，成功完成所有测试</li>
+                    <li>128K prefix 下 TTFT = 155.7s，比 GDS（207.1s）低 <strong>~25%</strong></li>
+                    <li><strong>启示</strong>：高性能 I/O 必须与计算深度集成设计，而非作为第三方插件接入</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Figure 13: Latency decomposition -->
+    <h3>Figure 13: 延迟分解与 Crossover Point 分析</h3>
+    <div class="flex-row" style="margin-bottom:0.4rem;">
+        <div class="fig-container" style="flex:1;">
+            <img src="arxiv_fig13.png" alt="Figure 13: Latency decomposition">
+        </div>
+        <div style="flex:1.1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 实验设置</h4>
+                <p class="small">固定 prompt 长度 32K，改变 cache hit rate（20% → 100%），将推理延迟分解为 Compute Time（有颜色）和 Bubble Time（蓝色虚线）。横轴为 cache hit rate，纵轴为时间。</p>
+            </div>
+            <div class="card amber" style="margin-top:0.3rem;">
+                <h4>⚠️ LMCache-SSD（图a）</h4>
+                <ul class="small">
+                    <li>Bubble time 极高且无法被 computation 隐藏</li>
+                    <li>Crossover Point 极低（~50%），过早进入 I/O-bound 状态</li>
+                </ul>
+            </div>
+            <div class="card" style="margin-top:0.3rem;border-left-color:#22c55e;">
+                <h4>✅ LMCache-DRAM-LW（图b）与 Tutti（图c）</h4>
+                <ul class="small">
+                    <li>两者曲线非常相似，bubble time 均保持极低</li>
+                    <li><strong>Tutti 的 Crossover Point = 98.3%</strong>（图c中 ★ 位置），远高于 SSD-LW 的 ~50%</li>
+                    <li>平均 bubble time 仅 <strong>25ms</strong>（93.75% hit 时仅 <strong>6ms</strong>）</li>
+                    <li>Tutti 在几乎整个范围内保持 <strong>compute-bound</strong>，达到 DRAM 级效率</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Figure 14: Inference cost -->
+    <h3>Figure 14: 推理成本分析</h3>
+    <div class="flex-row">
+        <div class="fig-container" style="flex:1;">
             <img src="arxiv_fig14.png" alt="Figure 14: Inference cost">
-            <div class="fig-caption">Figure 14: 每百万 token 推理成本。Tutti 比 GDS 降低 27%，比 SSD 降低 66%。</div>
+        </div>
+        <div style="flex:1.1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 成本模型</h4>
+                <p class="small">Cost = (GPU Cost + DRAM Cost + SSD Cost) / Throughput。采用云定价：H100 $5/h，DRAM $0.0088/GB/h，SSD $0.000082/GB/h（SSD 比 DRAM 便宜约 <strong>100 倍</strong>）。</p>
+            </div>
+            <div class="card green" style="margin-top:0.3rem;">
+                <h4>✅ 成本对比（每百万 tokens）</h4>
+                <ul class="small">
+                    <li><strong>LEval 1.5 RPS</strong>：Tutti = $0.25，GDS = $0.38（↓30%），SSD = $0.52（↓52%），DRAM = $0.36（↓31%）</li>
+                    <li><strong>LooGLE 0.5 RPS</strong>：Tutti 比 LMCache-SSD 降低 <strong>66.2%</strong>，比 LMCache-GDS 降低 <strong>~27%</strong></li>
+                    <li>Tutti 在所有负载下始终为 <strong>成本最低</strong> 的方案</li>
+                </ul>
+            </div>
+            <div class="card amber" style="margin-top:0.3rem;">
+                <h4>💡 成本优势的来源</h4>
+                <ul class="small">
+                    <li><strong>SSD 便宜</strong>：每 GB 成本仅为 DRAM 的 ~1/100</li>
+                    <li><strong>GPU 利用率高</strong>：Tutti 饱和 GPU 计算资源，最大化 tokens/GPU-hour</li>
+                    <li><strong>SSD 带宽利用率高</strong>：LMCache-SSD 虽然也用 SSD，但 I/O 瓶颈导致 GPU 空闲，单位成本反而更高</li>
+                    <li>Tutti = "SSD 的低成本 + DRAM 级性能" 的最佳组合</li>
+                </ul>
+            </div>
         </div>
     </div>
     <div class="page-num">13 / 16</div>
 </div>
 
-<!-- Slide 14: 更多实验文字总结 -->
+<!-- Slide 14: 实验结果速查表 -->
 <div class="slide">
-    <h2>更多实验结果小结</h2>
-    <div class="grid-2">
-        <div class="card amber">
-            <h4>分布式扩展性</h4>
-            <ul class="small">
-                <li>GLM-4-9B-1M, 2GPU, 4-Disk</li>
-                <li>LMCache-GDS 在 512K/640K prefix 时 <strong>OOM 失败</strong></li>
-                <li>Tutti 无需 staging buffer，640K 仅 <strong>1.2s</strong></li>
-                <li>原因：GDS 的 cufile 需要额外 staging buffer 显存</li>
-            </ul>
-        </div>
-        <div class="card purple">
-            <h4>Layerwise Async Pipelining</h4>
-            <ul class="small">
-                <li>Tutti 将 crossover point 从 ~50% 推到 <strong>98.3%</strong></li>
-                <li>几乎全范围 compute-bound</li>
-                <li>bubble time 平均仅 25ms（93.75% hit 时仅 6ms）</li>
-            </ul>
-        </div>
-        <div class="card green">
-            <h4>经济成本分析</h4>
-            <ul class="small">
-                <li>SSD 成本 ≈ DRAM 的 <strong>1/100</strong></li>
-                <li>Tutti 比 LMCache-SSD 降低 <strong>66.2%</strong></li>
-                <li>Tutti 比 LMCache-GDS 降低 <strong>~27%</strong></li>
-                <li>接近纯 DRAM 性能，容量近乎无限</li>
-            </ul>
-        </div>
-        <div class="card red">
-            <h4>多 GPU NVMe 共享</h4>
-            <ul class="small">
-                <li>每个 GPU 独立 Queue Pair，无竞争</li>
-                <li>32 队列/GPU（SSD 支持 256 队列）</li>
-                <li>所有 GPU 可并行访问本地 NVMe</li>
-            </ul>
-        </div>
+    <h2>实验结果速查表</h2>
+    <p class="small" style="margin-bottom:0.3rem;color:#666;">端到端性能、消融实验、成本分析核心数据一览</p>
+    <table>
+        <tr><th>实验</th><th>指标</th><th>Tutti</th><th>vs GDS</th><th>vs DRAM</th><th>vs SSD</th></tr>
+        <tr><td rowspan="3"><strong>端到端性能</strong><br><span class="small">(LEval, v0.17.0)</span></td>
+            <td>TTFT（高负载）</td><td style="color:#22c55e;font-weight:600;">最优</td><td>↓78.3%</td><td>↓69.1%</td><td>↓&gt;90%</td></tr>
+        <tr><td>ITL（1.5 RPS）</td><td style="color:#22c55e;font-weight:600;">最优</td><td>↓24.4%</td><td>↓22.0%</td><td>—</td></tr>
+        <tr><td>有效请求率（1s SLO）</td><td style="color:#22c55e;font-weight:600;">最高</td><td><strong>2×</strong></td><td>1.5×</td><td>—</td></tr>
+        <tr><td><strong>原始带宽</strong></td>
+            <td>Retrieve（128K）</td><td style="color:#22c55e;font-weight:600;">25.9 GB/s</td><td><strong>2.08×</strong></td><td>—</td><td>—</td></tr>
+        <tr><td><strong>PRP vs SGL</strong></td>
+            <td>Read / Write</td><td style="color:#22c55e;font-weight:600;">SGL</td><td>Read 31× / Write 91×</td><td colspan="2">（SGL 相对 PRP）</td></tr>
+        <tr><td><strong>前缀复用</strong></td>
+            <td>TTFT @112K prefix</td><td style="color:#22c55e;font-weight:600;">3.43s</td><td>↓61.4%</td><td>↑20.6%</td><td>↓2.28×</td></tr>
+        <tr><td><strong>分布式扩展</strong></td>
+            <td>TTFT @640K prefix</td><td style="color:#22c55e;font-weight:600;"><strong>1.2s</strong></td><td style="color:#ef4444;">OOM失败</td><td>—</td><td>—</td></tr>
+        <tr><td><strong>延迟分解</strong></td>
+            <td>Crossover Point</td><td style="color:#22c55e;font-weight:600;"><strong>98.3%</strong></td><td>N/A</td><td>97.9%</td><td>~50%</td></tr>
+        <tr><td rowspan="2"><strong>推理成本</strong></td>
+            <td>LEval @1.5 RPS</td><td style="color:#22c55e;font-weight:600;">~$0.25/M</td><td>↓30%</td><td>↓31%</td><td>↓52%</td></tr>
+        <tr><td>LooGLE @0.5 RPS</td><td style="color:#22c55e;font-weight:600;">最低</td><td>↓27%</td><td>—</td><td>↓66%</td></tr>
+    </table>
+    <div class="highlight" style="margin-top:0.4rem;">
+        <strong>结论：</strong> Tutti 在所有维度上全面领先现有方案——TTFT 降 78.3%、请求率提 2×、成本降 27%。
+        最关键的是，Tutti 实现了 <strong>DRAM 级推理性能 + SSD 级无限容量</strong> 的理想组合。
     </div>
     <div class="page-num">14 / 16</div>
 </div>
