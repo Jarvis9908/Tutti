@@ -399,8 +399,8 @@
 <!-- Slide 5: GDS的局限性 + Figure 2 -->
 <div class="slide">
     <h2>GDS 为什么不够？</h2>
-    <div class="grid-2">
-        <div>
+    <div class="flex-row">
+        <div style="flex:1;">
             <h3>CPU 仍然在关键路径上</h3>
             <ul>
                 <li>GDS 移除了 CPU 数据路径（零拷贝），但 <strong>每个 I/O 仍需 CPU 发起</strong></li>
@@ -414,13 +414,36 @@
                 <li>vs SSD：大量随机小 I/O → 带宽利用率极低</li>
             </ul>
         </div>
-        <div>
+        <div style="flex:1.3;">
             <h3>Figure 2: SSD 导致严重 GPU Bubble</h3>
             <div class="fig-container">
                 <img src="arxiv_fig2.png" alt="Figure 2: Inference performance comparison">
-                <div class="fig-caption">Figure 2: vLLM with LMCache on Llama3-8B, 64K seq, 75% hit. SSD/GDS 的 GPU bubble 超过 70%，
-                vLLM v0.17.0 下 SSD 甚至慢于 HBM 重计算（虚线）。</div>
             </div>
+        </div>
+    </div>
+    <div class="flex-row" style="margin-top:0.3rem;">
+        <div class="card" style="flex:1;border-left-color:#4a6cf7;">
+            <h4>📊 图表解读</h4>
+            <p class="small">本图为 Llama3-8B 在 64K 序列长度、75% cache hit rate 下，不同存储后端的推理延迟分解。虚线为纯 HBM 重计算（不缓存）的推理时间。紫色 = 计算时间，蓝色 = GPU bubble（I/O等待时间）。</p>
+        </div>
+        <div class="card red" style="flex:1;">
+            <h4>❌ 核心结论</h4>
+            <ul class="small">
+                <li><strong>HBM</strong>：TTFT 9.4s，完全计算密集</li>
+                <li><strong>DRAM</strong>：TTFT 30.5s，少量 bubble，可接受</li>
+                <li><strong>SSD（无 LW）</strong>：TTFT 76.9s，bubble 占 <strong>84.0%</strong></li>
+                <li><strong>SSD + GDS</strong>：TTFT 72.8s，bubble 仍占 <strong>78.9%</strong></li>
+                <li><strong>vLLM v0.17.0（右图）</strong>：计算更快，但 SSD/GDS 反而更差，SSD 甚至慢于 <strong>重计算（虚线）</strong>——意味着启用 SSD KV Cache 反而拖慢了推理！</li>
+            </ul>
+        </div>
+        <div class="card amber" style="flex:1;">
+            <h4>💡 为什么 layer-wise 流水线（LW）在 SSD 上反而更糟？</h4>
+            <ul class="small">
+                <li>Layer-wise = 将传输分成更小的批次以 overlap 计算</li>
+                <li>但在 SSD 上这导致 <strong>更小的 I/O 粒度 → 更多 I/O 操作数 → 更大的 CPU 调度开销</strong></li>
+                <li>DRAM 能受益于 LW（低延迟、细粒度访问），而 SSD 反而受害</li>
+                <li><strong>本质矛盾</strong>：SSD 需要大块连续 I/O 才能饱和带宽，但 paged KV 布局天生碎片化</li>
+            </ul>
         </div>
     </div>
     <div class="page-num">5 / 16</div>
@@ -465,10 +488,10 @@
             <h3>GPU File Pool & P2P Mapping</h3>
             <ul>
                 <li>每个 memory block → 一个 object（K 对象 + V 对象）</li>
-                <li>GPU file = 2 × L 个 object</li>
-                <li>Tensor-Stripe 布局：按 tensor 粒度 striped</li>
-                <li>预分配 NVMe file pool，启动时完成</li>
-                <li>P2P 映射表：虚拟地址 → PCI 物理地址，启动时预计算</li>
+                <li>GPU file = 2 × L 个 object（L 为层数）</li>
+                <li>Tensor-Stripe 布局：按 tensor 粒度 striped，而非细粒度 striping</li>
+                <li>预分配 NVMe file pool，启动时完成，运行时零分配开销</li>
+                <li>P2P 映射表：KV Cache 虚拟地址 → PCI 物理地址，启动时预计算</li>
                 <li><span class="tag">关键优化</span> <strong>SGL 代替 PRP</strong>：HBM 开销 3.75GB → 15MB</li>
             </ul>
         </div>
@@ -480,9 +503,45 @@
             </div>
         </div>
     </div>
-    <div class="fig-container">
-        <img src="arxiv_fig4.png" alt="Figure 4: GPU-centric KV cache store layout" style="max-width:75%;">
-        <div class="fig-caption">Figure 4: GPU-centric KV Cache Store 整体架构</div>
+    <h3>Figure 4: GPU-Centric KV Cache Store 架构详解</h3>
+    <div class="flex-row">
+        <div class="fig-container" style="flex:1;">
+            <img src="arxiv_fig4.png" alt="Figure 4: GPU-centric KV cache store layout" style="max-width:100%;">
+        </div>
+        <div style="flex:1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 架构组件解读</h4>
+                <p class="small">图为 GPU-centric KV Cache Object Store 的整体架构，从 GPU HBM 到 NVMe SSD 的分层设计。</p>
+            </div>
+            <div class="card green" style="margin-top:0.3rem;">
+                <h4>① GPU 侧组件（上图）</h4>
+                <ul class="small">
+                    <li><strong>GPU KV Cache Pool</strong>：HBM 中预分配的 KV block 集合，包含 K 和 V 的分块</li>
+                    <li><strong>P2P Memory Mapping Table</strong>：将虚拟地址映射为 PCI 物理地址（SGL 格式），供 GPU 直接提交 I/O</li>
+                    <li><strong>Memory Blocks</strong>：按层（Layer 0…n）组织的 KV block，每个 block 包含 K 和 V 两部分</li>
+                </ul>
+            </div>
+            <div class="card amber" style="margin-top:0.3rem;">
+                <h4>② GPU File Pool（中图）</h4>
+                <ul class="small">
+                    <li>每个 GPU file 包含 2×L 个 object（每层一个 K object + 一个 V object）</li>
+                    <li>Object 粒度与 inference engine 的 block 粒度对齐</li>
+                    <li>GPU file 对 inference engine 可见，提供 Store/Retrieve 接口</li>
+                </ul>
+            </div>
+            <div class="card purple" style="margin-top:0.3rem;">
+                <h4>③ NVMe File Pool（下图）</h4>
+                <ul class="small">
+                    <li>由 GeminiFS 管理，作为物理存储 extent</li>
+                    <li>Tensor-Stripe 布局：按 tensor 粒度 striping 到多块 SSD</li>
+                    <li>Round-Robin 放置：均匀分布 I/O 负载，饱和聚合 NVMe 带宽</li>
+                </ul>
+            </div>
+            <div class="highlight" style="margin-top:0.3rem;">
+                <strong>关键设计决策：</strong> CPU 管理 Hash 元数据（索引、共享、分配），
+                GPU 只持有 I/O 提交所需的轻量元数据（P2P 映射表）。CPU 开销从 <strong>O(L·N) → O(L)</strong>。
+            </div>
+        </div>
     </div>
     <div class="page-num">7 / 16</div>
 </div>
@@ -525,8 +584,8 @@
 <!-- Slide 9: GPU io_uring + Figure 5 -->
 <div class="slide">
     <h2>② GPU io_uring (gio_uring)</h2>
-    <div class="grid-2">
-        <div>
+    <div class="flex-row">
+        <div style="flex:1;">
             <h3>设计思想</h3>
             <ul>
                 <li>模拟 CPU-side <code>io_uring</code>，<strong>完全在 GPU 侧</strong>运作</li>
@@ -535,22 +594,50 @@
             </ul>
             <h3>关键组件</h3>
             <ul>
-                <li><strong>Zero-Copy Ring Buffer</strong>：SQ/CQ 驻留 GPU HBM，CPU 通过 non-cached mmap 写入</li>
-                <li><strong>IOCB/IOCTX</strong>：每个 IOCB 含 2048 个 IOCTX，匹配 SM/warp 粒度</li>
-                <li><strong>SM Partitioning</strong>：通过 Green Context 隔离 I/O 和 Compute domain</li>
+                <li><strong>Zero-Copy Ring Buffer</strong>：SQ/CQ 驻留 GPU HBM，CPU 通过 non-cached mmap 写入，避免运行时内存分配和拷贝</li>
+                <li><strong>IOCB/IOCTX</strong>：每个 IOCB 含 2048 个 IOCTX，每个 IOCTX 记录 SGL 地址 + GPU 文件偏移 + 长度</li>
+                <li><strong>SM Partitioning</strong>：通过 NVIDIA Green Context 隔离 I/O domain 和 Compute domain，避免 I/O kernel 阻塞计算 kernel</li>
             </ul>
             <h3>I/O 流程</h3>
             <ol class="small">
-                <li>CPU: init_queue(depth) → 创建 SQ/CQ</li>
-                <li>CPU: get_iocb(nums,event) → 填充 IOCTX（CUDA event 保证依赖）</li>
-                <li>CPU: issue_io(IOCB_ids,SMs) → 启动 GPU kernel；GPU 生成并提交 NVMe 命令</li>
-                <li>GPU: wait_cqe() → 轮询 CQ 完成，无需 CPU 参与</li>
+                <li><strong>init_queue(depth)</strong> → 创建 SQ/CQ（depth 个 IOCB）</li>
+                <li><strong>get_iocb(nums,event)</strong> → 填充 IOCTX（CUDA event 保证依赖顺序）</li>
+                <li><strong>issue_io(IOCB_ids,SMs)</strong> → 启动 GPU I/O kernel；GPU 生成并提交 NVMe 命令，写 doorbell</li>
+                <li><strong>wait_cqe()</strong> → 在 GPU 上轮询 CQ 完成，无需 CPU 参与</li>
             </ol>
+            <div class="highlight" style="margin-top:0.3rem;">
+                <strong>效果：</strong> GPU 可一次发起 <strong>数千并行 I/O 请求</strong>，饱和 SSD 带宽。
+            </div>
         </div>
-        <div>
+        <div style="flex:1.2;">
             <div class="fig-container">
                 <img src="arxiv_fig5.png" alt="Figure 5: GPU io_uring architecture">
-                <div class="fig-caption">Figure 5: GPU io_uring 架构与 I/O 处理流程。GPU 可一次发起数千并行 I/O 请求。</div>
+            </div>
+            <div class="card" style="margin-top:0.3rem;border-left-color:#4a6cf7;">
+                <h4>📊 图表解读</h4>
+                <p class="small">图为 gio_uring 的架构与 I/O 处理流程。图中分为 CPU 和 GPU 两个角色：</p>
+            </div>
+            <div class="card green" style="margin-top:0.2rem;border-left-color:#22c55e;">
+                <h4>① CPU 侧职责（浅色区域）</h4>
+                <ul class="small">
+                    <li><strong>1. Create SQ/CQ</strong>：初始化一对 lock-free ring buffer（Submission Queue / Completion Queue），位于 GPU HBM 但通过 non-cached mmap 映射到 CPU 地址空间</li>
+                    <li><strong>2.1 Get IOCBs + 2.2 Fill IOCTXs</strong>：从 SQ 获取空闲 IOCB 槽位，填充 SGL 地址、GPU 文件偏移、长度等信息。插入 CUDA event 保证 I/O 在计算依赖完成后才执行</li>
+                    <li><strong>3.1 Launch Kernel</strong>：将 I/O kernel 和 model compute kernel 一并 enqueue，由 GPU 侧调度执行</li>
+                </ul>
+            </div>
+            <div class="card purple" style="margin-top:0.2rem;border-left-color:#8b5cf6;">
+                <h4>② GPU 侧执行（深色区域）</h4>
+                <ul class="small">
+                    <li><strong>IOCB 结构</strong>：每个 IOCB 含 idx、num_ioctx、event 字段，一个 SQ entry 对应一个 IOCB（而非单个 I/O 命令）</li>
+                    <li><strong>IOCTX</strong>：每个 IOCB 含多达 <strong>2048 个 IOCTX</strong>，每个 IOCTX 代表一个 I/O 上下文（SGL 地址 + 偏移 + 长度），对应 GPU 最小调度单元（SM/Warp）</li>
+                    <li><strong>3.2 Issue I/O</strong>：GPU kernel 遍历 IOCB 中的所有 IOCTX，批量生成 NVMe 命令写入 Submission Queue，最终写 doorbell 通知 SSD</li>
+                    <li><strong>4. Poll CQ</strong>：GPU 轮询 Completion Queue，I/O 完成后自动进行下一步处理</li>
+                    <li>Storage 与 Compute 通过 <strong>SM Partitioning</strong> 物理隔离，互不干扰</li>
+                </ul>
+            </div>
+            <div class="card amber" style="margin-top:0.2rem;border-left-color:#f59e0b;">
+                <h4>💡 与传统 CPU io_uring 的关键区别</h4>
+                <p class="small">传统 CPU io_uring：1 SQ entry = 1 I/O 命令。<strong>gio_uring</strong>：1 SQ entry (IOCB) = 2048 个 IOCTX，每个 IOCTX 就是一个 I/O 上下文。这种<b>批量化设计</b>使得 GPU 能够一次提交数千个 I/O 请求，充分利用 NVMe 的并行能力。</p>
             </div>
         </div>
     </div>
@@ -560,8 +647,8 @@
 <!-- Slide 10: Slack-Aware Scheduling + Figure 6 & 7 -->
 <div class="slide">
     <h2>③ Slack-Aware I/O 调度</h2>
-    <div class="grid-2">
-        <div>
+    <div class="flex-row">
+        <div style="flex:1;">
             <h3>两大干扰问题</h3>
             <div class="card red">
                 <h4>读写带宽冲突</h4>
@@ -579,14 +666,75 @@
                 <li><strong>Decoupled R/W</strong>：避免 layer-wise 流水线的 R/W 并发</li>
             </ul>
         </div>
-        <div>
-            <div class="fig-container">
-                <img src="arxiv_fig6.png" alt="Figure 6: Concurrent vs Decoupled R/W bandwidth">
-                <div class="fig-caption">Figure 6: 并发 R/W 导致带宽降 60%，Tutti 将 R/W 解耦。</div>
+        <div style="flex:1.5;">
+            <h3>Figure 6: 并发 vs 解耦 R/W 带宽对比</h3>
+            <div class="flex-row" style="margin-top:0;">
+                <div class="fig-container" style="flex:1;">
+                    <img src="arxiv_fig6.png" alt="Figure 6: Concurrent vs Decoupled R/W bandwidth">
+                </div>
+                <div style="flex:1;">
+                    <div class="card" style="border-left-color:#4a6cf7;">
+                        <h4>📊 图表解读</h4>
+                        <p class="small">Real-time PCIe 带宽跟踪。横轴为时间（ms），纵轴为吞吐量（GB/s），蓝 = PCIe Read，橙 = PCIe Write。</p>
+                    </div>
+                    <div class="card red" style="margin-top:0.2rem;">
+                        <h4>❌ 图(a) 并发 R/W</h4>
+                        <ul class="small">
+                            <li>Read 和 Write 同时进行 → 带宽冲突严重</li>
+                            <li>总带宽从 40+ GB/s 降至 ~16 GB/s</li>
+                            <li><strong>下降 60.1%</strong> — NVMe 内部缓存无法同时服务 R/W</li>
+                            <li>naive layer-wise pipelining 的问题：写前一层 KV + 读后一层 KV</li>
+                        </ul>
+                    </div>
+                    <div class="card green" style="margin-top:0.2rem;">
+                        <h4>✅ 图(b) 解耦 R/W</h4>
+                        <ul class="small">
+                            <li>Read 和 Write 时间片分离，不并发执行</li>
+                            <li>总带宽恢复到 40+ GB/s，接近设备极限</li>
+                            <li>Tutti 策略：先调度所有 Read，再在 slack window 内调度 Write</li>
+                        </ul>
+                    </div>
+                </div>
             </div>
-            <div class="fig-container" style="margin-top:0.3rem;">
-                <img src="arxiv_fig7.png" alt="Figure 7: Slack-aware I/O scheduler" style="max-width:80%;">
-                <div class="fig-caption">Figure 7: Slack-Aware I/O Scheduler 概览。Crossover Point 达到 98.3%。</div>
+        </div>
+    </div>
+
+    <h3 style="margin-top:0.3rem;">Figure 7: Slack-Aware I/O Scheduler 工作原理</h3>
+    <div class="flex-row">
+        <div class="fig-container" style="flex:1.2;">
+            <img src="arxiv_fig7.png" alt="Figure 7: Slack-aware I/O scheduler" style="max-width:100%;">
+        </div>
+        <div style="flex:1;">
+            <div class="card" style="border-left-color:#4a6cf7;">
+                <h4>📊 图表解读</h4>
+                <p class="small">Slack-Aware 调度器的整体执行时序图。横轴为时间，从上到下为 SM 利用率、Slack Window、I/O Stream、SQ 队列状态。</p>
+            </div>
+            <div class="card green" style="margin-top:0.2rem;">
+                <h4>① SM 利用率 & Slack Window</h4>
+                <ul class="small">
+                    <li>Prefill 阶段 SM 并非始终满载：Attention 等算子占用低 → 有空闲 SM</li>
+                    <li><strong>Slack Window</strong> = 有 <strong>空闲 SM</strong> 且 <strong>无 R/W 冲突</strong> 的执行窗口</li>
+                    <li>Scheduler 通过 <strong>离线 Profiling</strong> 预知每层的 slack 模式，查表决策</li>
+                </ul>
+            </div>
+            <div class="card amber" style="margin-top:0.2rem;">
+                <h4>② 事件驱动的 I/O 发射</h4>
+                <ul class="small">
+                    <li>每层 prefill 开始时查 slack 表判断是否发射 I/O</li>
+                    <li><strong>Read kernel（R）</strong>发射后在 slack window 内执行</li>
+                    <li><strong>Write kernel（W）</strong>通过 CUDA event 等待 Read 完成后才启动</li>
+                    <li>SQ 中的 I/O 请求排队等待，不抢 compute 的 SM</li>
+                </ul>
+            </div>
+            <div class="card purple" style="margin-top:0.2rem;">
+                <h4>③ Decode 阶段 Write 刷出</h4>
+                <ul class="small">
+                    <li>Prefill 未完成的 Write 在 Decode 阶段 best-effort 刷出</li>
+                    <li>Decode SM 利用率通常比 Prefill 低，有更多 slack</li>
+                </ul>
+            </div>
+            <div class="highlight" style="margin-top:0.2rem;">
+                <strong>结果</strong>：Crossover Point = <strong>98.3%</strong>，几乎全范围 compute-bound。
             </div>
         </div>
     </div>
