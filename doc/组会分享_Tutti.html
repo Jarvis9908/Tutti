@@ -303,11 +303,59 @@
         <div class="venue">arXiv:2605.03375v1 · May 2026</div>
         <div class="meta">厦门大学 · 上海交通大学 · 香港科技大学</div>
     </div>
-    <div class="page-num">1 / 16</div>
+    <div class="page-num">1 / 17</div>
 </div>
 
 <!-- ============================================================ -->
-<!-- Slide 2: TOC -->
+<!-- Slide 2: Abstract -->
+<!-- ============================================================ -->
+<div class="slide" style="justify-content:center;">
+    <div style="max-width:1000px;margin:0 auto;">
+        <h2 style="font-size:1.8rem;border-bottom-color:#22c55e;display:block;text-align:center;margin-bottom:1.2rem;">📄 论文摘要</h2>
+        <div class="card green" style="border-left-width:6px;padding:1.2rem 1.5rem;">
+            <p style="font-size:0.82rem;line-height:1.8;margin-bottom:0.6rem;">
+                <strong>Tutti</strong> 是一个 <strong>以 GPU 为中心的 SSD 后端 KV Cache 存储方案</strong>，
+                旨在解决长上下文 LLM 推理中 KV Cache 卸载到 SSD 时的 <strong>严重 I/O 瓶颈</strong>。
+            </p>
+            <p style="font-size:0.82rem;line-height:1.8;margin-bottom:0.6rem;">
+                现有方案（包括 GPU Direct Storage）虽然移除了 CPU 数据路径，但每个 I/O 仍需 CPU 发起，
+                导致 CPU 仍在控制关键路径上（O(L·N) 开销）。Tutti 通过三项核心设计将 CPU
+                <strong>完全移除</strong> 出关键路径：
+            </p>
+            <ul style="font-size:0.78rem;line-height:1.8;margin-bottom:0.6rem;">
+                <li><strong>① GPU 原生对象存储</strong> —— GPU File Pool + P2P Mapping Table，SGL 代替 PRP（HBM 开销 3.75GB → 15MB）</li>
+                <li><strong>② GPU io_uring</strong> —— 零拷贝 ring buffer 实现 GPU 侧异步 I/O 提交/完成，CPU 仅每层加载一次 kernel（O(L)）</li>
+                <li><strong>③ Slack-Aware I/O 调度</strong> —— 离线 profile + 读写解耦 + SM 隔离，避免资源争抢</li>
+            </ul>
+        </div>
+        <div style="display:flex;gap:1rem;margin-top:1rem;">
+            <div style="flex:1;background:#f0fdf4;border-radius:12px;padding:1rem 1.2rem;border:1px solid #bbf7d0;">
+                <h4 style="color:#16a34a;margin-top:0;font-size:0.9rem;">🏆 核心结论</h4>
+                <ul style="font-size:0.72rem;margin:0.3rem 0 0 0;">
+                    <li><strong>TTFT 降低 78.3%</strong>（vs GDS-enabled LMCache）</li>
+                    <li><strong>请求率提升 2×</strong>（1s SLO 约束下）</li>
+                    <li><strong>服务成本降低 27%</strong></li>
+                    <li><strong>Crossover Point 达 98.3%</strong>（几乎全范围 compute-bound）</li>
+                    <li>达到 <strong>DRAM 级性能 + SSD 级无限容量</strong></li>
+                </ul>
+            </div>
+            <div style="flex:1;background:#fefce8;border-radius:12px;padding:1rem 1.2rem;border:1px solid #fde68a;">
+                <h4 style="color:#d97706;margin-top:0;font-size:0.9rem;">💡 关键 insight</h4>
+                <ul style="font-size:0.72rem;margin:0.3rem 0 0 0;">
+                    <li><strong>问题本质</strong>：不是 SSD 带宽不够，而是 <strong>CPU 无法高效处理海量小 I/O</strong></li>
+                    <li><strong>解法本质</strong>：借鉴 BaM/GeminiFS 的 GPU-centric 思路，让 GPU 自己管 I/O</li>
+                    <li><strong>核心权衡</strong>：CPU 管理 Hash 元数据（off critical path），GPU 持有轻量 P2P 映射</li>
+                    <li><strong>工程落地</strong>：集成到 vLLM，开源可用，支持单/多 GPU + 跨节点扩展（Mooncake）</li>
+                    <li><strong>局限</strong>：依赖 NVIDIA Green Context 硬件特性</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    <div class="page-num">2 / 17</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Slide 3: TOC -->
 <!-- ============================================================ -->
 <div class="slide">
     <h2>📋 提纲</h2>
@@ -328,7 +376,7 @@
             <p class="small">贡献总结 · 启发 · 与代码仓库的关联</p>
         </div>
     </div>
-    <div class="page-num">2 / 16</div>
+    <div class="page-num">3 / 17</div>
 </div>
 
 <!-- ============================================================ -->
@@ -338,7 +386,7 @@
     <span class="number">PART 1</span>
     <h2>背景与动机</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Background & Motivation</div>
-    <div class="page-num">3 / 16</div>
+    <div class="page-num">4 / 17</div>
 </div>
 
 <!-- Slide 3: LLM推理与KV Cache -->
@@ -371,7 +419,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">3 / 16</div>
+    <div class="page-num">4 / 17</div>
 </div>
 
 <!-- Slide 4: 三级存储瓶颈 -->
@@ -393,7 +441,7 @@
             <p class="small">尽管有 GPU Direct Storage (GDS)，GPU 空闲时间仍占 <strong>70–80%</strong>，甚至慢于重计算。</p>
         </div>
     </div>
-    <div class="page-num">4 / 16</div>
+    <div class="page-num">5 / 17</div>
 </div>
 
 <!-- Slide 5: GDS的局限性 + Figure 2 -->
@@ -446,7 +494,7 @@
             </ul>
         </div>
     </div>
-    <div class="page-num">5 / 16</div>
+    <div class="page-num">6 / 17</div>
 </div>
 
 <!-- ============================================================ -->
@@ -456,7 +504,7 @@
     <span class="number">PART 2</span>
     <h2>核心设计</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Tutti: GPU-Centric KV Cache Object Store</div>
-    <div class="page-num">6 / 16</div>
+    <div class="page-num">7 / 17</div>
 </div>
 
 <!-- Slide 6: Design Overview + Figure 1 -->
@@ -477,7 +525,7 @@
         <div class="card green"><h4>② GPU io_uring</h4><p class="small">零拷贝 ring buffer，GPU 侧异步 I/O 提交/完成，SM 分区隔离</p></div>
         <div class="card green"><h4>③ Slack-Aware 调度</h4><p class="small">离线 profile 窗口 + 读写分离调度，避免带宽冲突和 SM 争抢</p></div>
     </div>
-    <div class="page-num">6 / 16</div>
+    <div class="page-num">7 / 17</div>
 </div>
 
 <!-- Slide 7: Object Store + Figure 3 & 4 -->
@@ -543,7 +591,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">7 / 16</div>
+    <div class="page-num">8 / 17</div>
 </div>
 
 <!-- Slide 8: SGL优化 + Figure 10 -->
@@ -578,7 +626,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">8 / 16</div>
+    <div class="page-num">9 / 17</div>
 </div>
 
 <!-- Slide 9: GPU io_uring + Figure 5 -->
@@ -641,7 +689,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">9 / 16</div>
+    <div class="page-num">10 / 17</div>
 </div>
 
 <!-- Slide 10: Slack-Aware Scheduling + Figure 6 & 7 -->
@@ -738,7 +786,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">10 / 16</div>
+    <div class="page-num">11 / 17</div>
 </div>
 
 <!-- ============================================================ -->
@@ -748,7 +796,7 @@
     <span class="number">PART 3</span>
     <h2>实验评估</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Evaluation</div>
-    <div class="page-num">11 / 16</div>
+    <div class="page-num">12 / 17</div>
 </div>
 
 <!-- Slide 11: 实验配置 + Table 1 -->
@@ -791,7 +839,7 @@
         <tr><td>DRAM</td><td>256 GB</td><td>53%</td><td>24%</td></tr>
         <tr><td style="font-weight:600;">SSD (Tutti)</td><td style="font-weight:600;">14 TB</td><td style="font-weight:600;color:#22c55e;">84%</td><td style="font-weight:600;color:#22c55e;">86%</td></tr>
     </table>
-    <div class="page-num">11 / 16</div>
+    <div class="page-num">12 / 17</div>
 </div>
 
 <!-- Slide 12: 端到端性能 + Figure 8 & 9 -->
@@ -864,7 +912,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">12 / 16</div>
+    <div class="page-num">13 / 17</div>
 </div>
 
 <!-- Slide 13: 消融实验与扩展分析 + Figure 11-14 -->
@@ -989,7 +1037,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">13 / 16</div>
+    <div class="page-num">14 / 17</div>
 </div>
 
 <!-- Slide 14: 实验结果速查表 -->
@@ -1020,7 +1068,7 @@
         <strong>结论：</strong> Tutti 在所有维度上全面领先现有方案——TTFT 降 78.3%、请求率提 2×、成本降 27%。
         最关键的是，Tutti 实现了 <strong>DRAM 级推理性能 + SSD 级无限容量</strong> 的理想组合。
     </div>
-    <div class="page-num">14 / 16</div>
+    <div class="page-num">15 / 17</div>
 </div>
 
 <!-- ============================================================ -->
@@ -1030,7 +1078,7 @@
     <span class="number">PART 4</span>
     <h2>总结与思考</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Conclusion & Discussion</div>
-    <div class="page-num">15 / 16</div>
+    <div class="page-num">16 / 17</div>
 </div>
 
 <!-- Slide 15: Conclusion -->
@@ -1075,7 +1123,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">15 / 16</div>
+    <div class="page-num">16 / 17</div>
 </div>
 
 <!-- ============================================================ -->
