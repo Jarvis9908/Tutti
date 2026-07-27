@@ -303,7 +303,7 @@
         <div class="venue">arXiv:2605.03375v1 · May 2026</div>
         <div class="meta">厦门大学 · 上海交通大学 · 香港科技大学</div>
     </div>
-    <div class="page-num">1 / 17</div>
+    <div class="page-num">1 / 18</div>
 </div>
 
 <!-- ============================================================ -->
@@ -351,7 +351,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">2 / 17</div>
+    <div class="page-num">2 / 18</div>
 </div>
 
 <!-- ============================================================ -->
@@ -376,7 +376,7 @@
             <p class="small">贡献总结 · 启发 · 与代码仓库的关联</p>
         </div>
     </div>
-    <div class="page-num">3 / 17</div>
+    <div class="page-num">3 / 18</div>
 </div>
 
 <!-- ============================================================ -->
@@ -386,7 +386,7 @@
     <span class="number">PART 1</span>
     <h2>背景与动机</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Background & Motivation</div>
-    <div class="page-num">4 / 17</div>
+    <div class="page-num">4 / 18</div>
 </div>
 
 <!-- Slide 3: LLM推理与KV Cache -->
@@ -419,7 +419,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">4 / 17</div>
+    <div class="page-num">4 / 18</div>
 </div>
 
 <!-- Slide 4: 三级存储瓶颈 -->
@@ -441,10 +441,66 @@
             <p class="small">尽管有 GPU Direct Storage (GDS)，GPU 空闲时间仍占 <strong>70–80%</strong>，甚至慢于重计算。</p>
         </div>
     </div>
-    <div class="page-num">5 / 17</div>
+    <div class="page-num">5 / 18</div>
 </div>
 
-<!-- Slide 5: GDS的局限性 + Figure 2 -->
+<!-- ============================================================ -->
+<!-- Slide 5 (new): 过渡 - 当前 SOTA 层级 KV Cache -->
+<!-- ============================================================ -->
+<div class="slide">
+    <h2>现有方案回顾：层级 KV Cache 与 GDS</h2>
+    <div class="flex-row">
+        <div style="flex:1;">
+            <h3>目前 SOTA：LMCache</h3>
+            <ul>
+                <li>LMCache 是目前最先进的层级 KV Cache 系统（v0.4.2）</li>
+                <li>支持 <strong>HBM → DRAM → SSD</strong> 三级卸载</li>
+                <li>采用 layer-wise compute-I/O 流水线重叠传输延迟</li>
+                <li>可选集成 <strong>GPU Direct Storage (GDS)</strong> 加速 SSD 访问</li>
+            </ul>
+            <h3>DRAM 层级：效果不错</h3>
+            <ul>
+                <li>低延迟、细粒度 <code>cudaMemcpyAsync</code> 可合并为少量 GPU kernel</li>
+                <li>Layer-wise pipelining 有效隐藏 DRAM→HBM 传输延迟</li>
+                <li>接近纯 HBM 性能——但 <strong>DRAM 容量有限</strong>（~2TB）</li>
+            </ul>
+            <div class="card amber" style="margin-top:0.3rem;">
+                <h4>🤔 那为什么不用 LMCache + GDS 解决 SSD 问题？</h4>
+                <p class="small">GDS 看起来似乎是完美的解决方案——它允许 GPU 通过 DMA 直接访问 SSD，绕过 CPU 内存拷贝。
+                但下一页会看到，GDS 的 <strong>控制路径仍然依赖 CPU</strong>，并没有解决本质问题。</p>
+            </div>
+        </div>
+        <div style="flex:1;">
+            <h3>GPU Direct Storage (GDS) 是什么？</h3>
+            <div class="card green" style="border-left-color:#4a6cf7;">
+                <h4>✅ 它做了什么</h4>
+                <ul class="small">
+                    <li>允许 GPU 通过 <strong>peer-to-peer DMA</strong> 直接从 SSD 读取数据到 HBM</li>
+                    <li>消除了 CPU 内存中转（bounce buffer）→ <strong>零拷贝数据路径</strong></li>
+                    <li>减少了 CPU-GPU 之间的数据拷贝延迟</li>
+                </ul>
+            </div>
+            <div class="card red" style="margin-top:0.3rem;">
+                <h4>❌ 它没做什么</h4>
+                <ul class="small">
+                    <li>每个 I/O 仍需 <strong>CPU 发起和同步</strong>（调用 cuFile API）</li>
+                    <li>CPU 在控制路径上处理 <strong>O(L·N)</strong> 次 I/O 提交</li>
+                    <li>面对大量小 I/O 时，<strong>CPU 成为瓶颈</strong>——而非 SSD</li>
+                    <li>I/O 提交的软件开销（syscall、中断）依然存在</li>
+                    <li>GPU 不能自主发起 I/O，仍受制于 CPU 调度</li>
+                </ul>
+            </div>
+            <div class="highlight" style="margin-top:0.3rem;">
+                <strong>一句话：</strong> GDS 解决了 <strong>数据路径</strong>（GPU ↔ SSD 直连），
+                但没有解决 <strong>控制路径</strong>（CPU 仍在每个 I/O 的关键路径上）。<br>
+                → 仍然是 <strong>CPU-centric</strong> 的设计。
+            </div>
+        </div>
+    </div>
+    <div class="page-num">6 / 18</div>
+</div>
+
+<!-- Slide 6: GDS的局限性 + Figure 2 -->
 <div class="slide">
     <h2>GDS 为什么不够？</h2>
     <div class="flex-row">
@@ -494,7 +550,7 @@
             </ul>
         </div>
     </div>
-    <div class="page-num">6 / 17</div>
+    <div class="page-num">7 / 18</div>
 </div>
 
 <!-- ============================================================ -->
@@ -504,7 +560,7 @@
     <span class="number">PART 2</span>
     <h2>核心设计</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Tutti: GPU-Centric KV Cache Object Store</div>
-    <div class="page-num">7 / 17</div>
+    <div class="page-num">8 / 18</div>
 </div>
 
 <!-- Slide 6: Design Overview + Figure 1 -->
@@ -525,7 +581,7 @@
         <div class="card green"><h4>② GPU io_uring</h4><p class="small">零拷贝 ring buffer，GPU 侧异步 I/O 提交/完成，SM 分区隔离</p></div>
         <div class="card green"><h4>③ Slack-Aware 调度</h4><p class="small">离线 profile 窗口 + 读写分离调度，避免带宽冲突和 SM 争抢</p></div>
     </div>
-    <div class="page-num">7 / 17</div>
+    <div class="page-num">8 / 18</div>
 </div>
 
 <!-- Slide 7: Object Store + Figure 3 & 4 -->
@@ -591,7 +647,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">8 / 17</div>
+    <div class="page-num">9 / 18</div>
 </div>
 
 <!-- Slide 8: SGL优化 + Figure 10 -->
@@ -626,7 +682,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">9 / 17</div>
+    <div class="page-num">10 / 18</div>
 </div>
 
 <!-- Slide 9: GPU io_uring + Figure 5 -->
@@ -689,7 +745,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">10 / 17</div>
+    <div class="page-num">11 / 18</div>
 </div>
 
 <!-- Slide 10: Slack-Aware Scheduling + Figure 6 & 7 -->
@@ -786,7 +842,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">11 / 17</div>
+    <div class="page-num">12 / 18</div>
 </div>
 
 <!-- ============================================================ -->
@@ -796,7 +852,7 @@
     <span class="number">PART 3</span>
     <h2>实验评估</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Evaluation</div>
-    <div class="page-num">12 / 17</div>
+    <div class="page-num">13 / 18</div>
 </div>
 
 <!-- Slide 11: 实验配置 + Table 1 -->
@@ -839,7 +895,7 @@
         <tr><td>DRAM</td><td>256 GB</td><td>53%</td><td>24%</td></tr>
         <tr><td style="font-weight:600;">SSD (Tutti)</td><td style="font-weight:600;">14 TB</td><td style="font-weight:600;color:#22c55e;">84%</td><td style="font-weight:600;color:#22c55e;">86%</td></tr>
     </table>
-    <div class="page-num">12 / 17</div>
+    <div class="page-num">13 / 18</div>
 </div>
 
 <!-- Slide 12: 端到端性能 + Figure 8 & 9 -->
@@ -912,7 +968,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">13 / 17</div>
+    <div class="page-num">14 / 18</div>
 </div>
 
 <!-- Slide 13: 消融实验与扩展分析 + Figure 11-14 -->
@@ -1037,7 +1093,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">14 / 17</div>
+    <div class="page-num">15 / 18</div>
 </div>
 
 <!-- Slide 14: 实验结果速查表 -->
@@ -1068,7 +1124,7 @@
         <strong>结论：</strong> Tutti 在所有维度上全面领先现有方案——TTFT 降 78.3%、请求率提 2×、成本降 27%。
         最关键的是，Tutti 实现了 <strong>DRAM 级推理性能 + SSD 级无限容量</strong> 的理想组合。
     </div>
-    <div class="page-num">15 / 17</div>
+    <div class="page-num">16 / 18</div>
 </div>
 
 <!-- ============================================================ -->
@@ -1078,7 +1134,7 @@
     <span class="number">PART 4</span>
     <h2>总结与思考</h2>
     <div style="font-size: 0.75rem; color: #8890b0; margin-top: 0.5rem;">Conclusion & Discussion</div>
-    <div class="page-num">16 / 17</div>
+    <div class="page-num">17 / 18</div>
 </div>
 
 <!-- Slide 15: Conclusion -->
@@ -1123,7 +1179,7 @@
             </div>
         </div>
     </div>
-    <div class="page-num">16 / 17</div>
+    <div class="page-num">17 / 18</div>
 </div>
 
 <!-- ============================================================ -->
